@@ -29,7 +29,7 @@ services:
         BASE_IMAGE: dustynv/l4t-ml:r36.4.0
 
     # Image name after building
-    image: FaunaScope-edge-gpu:latest
+    image: faunascope-edge-gpu:latest
 
     # Override the default CMD with the entrypoint script
     # This runs both main.py and stream_server.py automatically

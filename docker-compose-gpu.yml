@@ -37,7 +37,7 @@ services:
         # BASE_IMAGE: nvcr.io/nvidia/pytorch:24.12-py3
 
     # Image name after building
-    image: FaunaScope-edge-gpu:latest
+    image: faunascope-edge-gpu:latest
 
     # Override the default CMD with the entrypoint script
     # This runs both main.py and stream_server.py automatically
