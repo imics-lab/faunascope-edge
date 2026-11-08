@@ -141,6 +141,7 @@ Running `python main.py` directly is mainly useful for local development or debu
     -   `pending_upload/`: Staging area for video/JSON pairs waiting to be uploaded.
     -   `uploaded/`: Archive for successfully uploaded files.
 -   **`scripts/`**: A collection of useful helper scripts for testing and debugging individual components.
+-   **`tests/`**: Unit tests, run with `pytest` (see Development and Testing).
 
 ## Development and Testing
 
@@ -150,3 +151,9 @@ The `scripts/` directory contains tools to help test parts of the system in isol
 -   `test_db_connection.py`: Check if the application can connect to your remote PostgreSQL database with the provided credentials.
 -   `test_detector.py`: Test motion detection module functionality using a video file.
 
+The unit tests in `tests/` run without a camera, a GPU, or a server. They need `ffmpeg` on the PATH and the Python packages in `requirements-dev.txt`:
+
+```sh
+pip install -r requirements-dev.txt
+pytest
+```
