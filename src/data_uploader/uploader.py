@@ -95,11 +95,12 @@ class DataUploader:
             logger.info("Data uploader is disabled in configuration. Files will remain in pending_upload folder.")
             return
 
+        # A missing setting idles the uploader rather than ending its process, which would stop recording too.
         for key in ('server_url', 'device_token'):
             value = str(self.config.get(key) or '')
             if not value or value.startswith('$'):
                 logger.error("uploader.%s is not set (see SERVER_URL and DEVICE_TOKEN in .env). Files will remain in pending_upload folder.", key)
-                return
+                self.resume_at = float('inf')
 
         if self.is_running:
             logger.warning("Data uploader is already running.")
