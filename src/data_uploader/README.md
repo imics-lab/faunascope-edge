@@ -2,16 +2,17 @@
 
 #### **1. Overview**
 
-This document outlines the functional requirements and technical specifications for the Data Uploader module (Module C). This module operates as a resilient, background service responsible for the reliable transmission of processed data from the edge device to a remote cloud server. Its primary function is to periodically scan for completed event packages, upload them to their designated storage and database endpoints, and handle network failures gracefully to ensure no data is lost.
+This document outlines the functional requirements and technical specifications for the Data Uploader module (Module C). This module operates as a resilient, background service responsible for the reliable transmission of processed data from the edge device to a remote cloud server. Its primary function is to periodically scan for completed event packages, send them to the FaunaScope server over HTTPS, and handle network failures gracefully to ensure no data is lost.
 
 #### **2. Core Functional Requirements**
 
 *   **Asynchronous Operation:** The module must run independently of the data capture and analysis modules, operating on a periodic schedule.
 *   **Filesystem-Based Queueing:** The module will use a designated local directory as its input queue, processing data packages as they appear.
 *   **Transactional Uploads:** Each event package (composed of a video and a JSON file) shall be treated as a single, atomic unit of work. The entire upload process for a single event must succeed before local files are cleaned up.
-*   **Secure Data Transfer:** All file transfers to the remote server must be conducted over a secure protocol (SFTP).
-*   **Database Integration:** The module must record event metadata in a remote PostgreSQL database, updating the record's status upon successful file transfer.
-*   **Resilience and Auto-Retry:** In the event of a network or server error at any stage of the upload process, the local files for the current job must remain untouched, allowing the system to automatically retry the upload on a subsequent scan.
+*   **Secure Data Transfer:** All transfers go to the server's upload API over HTTPS, authenticated by the device's token. The device holds no database or SSH credentials; the server creates the database records itself.
+*   **Resumable Transfer:** Videos are sent in chunks, and an interrupted upload resumes at the last chunk the server confirmed.
+*   **Resilience and Auto-Retry:** In the event of a network or server error at any stage of the upload process, the local files for the current job must remain untouched, allowing the system to automatically retry the upload later. Network failures and rejected events are handled differently (see section 5).
+*   **Data Budget:** The bytes sent per calendar day are capped, so that a backlog cannot use up a cellular data plan.
 
 #### **3. Interface Contract: Communication with Module B**
 
@@ -27,48 +28,33 @@ The interface for this module is based on the local filesystem, providing a deco
 
 #### **4. Technical Implementation Specifications**
 
-*   **Primary Libraries:** `psycopg2-binary` (for PostgreSQL), `paramiko` (for SFTP), `os`, `time`, `json`, `shutil`.
+*   **Primary Libraries:** `requests`, `hashlib`, `os`, `time`, `json`, `shutil`.
 *   **Class Structure:** All logic should be encapsulated within a Python class named `DataUploader`.
 *   **Configuration Management:** All external parameters will be provided via a configuration dictionary.
 
     **Required Configuration Parameters (`uploader` section):**
-    *   `scan_interval_seconds` (int): The number of seconds the module sleeps between scanning for new files.
-    *   `sftp` (dict):
-        *   `host` (str): IP address or hostname of the SFTP server.
-        *   `port` (int): SFTP port (typically `22`).
-        *   `username` (str): SFTP username.
-        *   `ssh_key_path` (str): Path to the private SSH key for authentication.
-        *   `remote_video_dir` (str): The absolute path on the remote server to store video files.
-        *   `remote_json_dir` (str): The absolute path on the remote server to store JSON files.
-    *   `database` (dict):
-        *   `host`, `port`, `dbname`, `user`, `password` for the PostgreSQL connection.
+    *   `scan_interval_seconds` (int): The number of seconds the module sleeps between upload passes.
+    *   `server_url` (str): The server's address, e.g. `https://faunascope.txst.edu`.
+    *   `device_token` (str): The device's upload token, issued by the server's administrator.
+    *   `chunk_size_kb` (int): The size of the chunks a video is sent in (the server accepts up to 2048).
+    *   `daily_upload_limit_mb` (int): The most video data to send per calendar day.
+    *   `event_attempts` (int), `deferral_hours` (number), `max_deferrals` (int): How rejected events are retried.
+    *   `request_timeout_seconds` (number): The timeout for each HTTP request.
 
 #### **5. Processing Pipeline Logic**
 
-The `DataUploader` class will implement a main loop that orchestrates the upload process. The logic for handling a single job must be strictly sequential and fail-safe.
+1.  **Main Loop:** Every `scan_interval_seconds`, unless uploads are paused after a network failure, the uploader makes one pass over the `event_*.json` files in the pending directory, oldest first, skipping events with a `.failed` marker or a deferral that has not expired. A pass stops at the first network failure or when the day's budget is spent.
 
-1.  **Main Loop:**
-    a. The loop runs indefinitely as long as the service is active.
-    b. **Scan for Jobs:** Get a list of all `.json` files in the configured `pending_upload` directory.
-    c. **Process Jobs:** Iterate through the list of found JSON files. For each file, execute the `_process_job` logic described below.
-    d. **Sleep:** After iterating through all found jobs, sleep for `scan_interval_seconds`.
+2.  **Single Event:** For an event `<event_id>`, with requests to `<server_url>/api/v1/events/<event_id>`:
 
-2.  **Single Job Processing Logic (`_process_job`):**
-    This logic must be wrapped in a `try...except` block to catch any exceptions (network errors, file not found, etc.) and ensure the main loop continues to run.
+    a. **Read Local Data:** Load the JSON file and find `<event_id>.mp4` next to it.
+    b. **Ask the Server:** `GET` returns `{"received": true}` if the server already holds the event, which goes straight to cleanup, or the number of bytes of the video it holds (`offset`).
+    c. **Send the Video:** From that offset, `PATCH .../video` sends one chunk at a time with an `Upload-Offset` header. Each chunk's size is counted against the day's budget before it is sent. If the server answers `409` with another offset, sending continues from that offset.
+    d. **Finish:** `POST` sends `{"metadata": ..., "video_size": ..., "video_sha256": ...}`. The server answers `201` after verifying the video and storing both files where its worker imports them, or `200` if it already held the event.
+    e. **Local Cleanup:** **If and only if the server answered `200` or `201`**, move the local `.json` and `.mp4` files to the `uploaded` directory.
 
-    a. **Read Local Data:** Load the JSON file. Check for the existence of the corresponding video file. If the video is missing, log an error and skip this job.
-    b. **Phase 1: Database INSERT:**
-        i.   Establish a connection to the PostgreSQL database.
-        ii.  Execute an `INSERT` statement into the `events` table with the metadata from the JSON file. Set the upload status field to `'pending'` and leave remote path fields as `NULL`.
-        iii. If the `INSERT` fails, log the error, close the DB connection, and abort the job. The local files remain, to be retried later.
-    c. **Phase 2: Secure File Transfer (SFTP):**
-        i.   Establish an SFTP connection to the remote server.
-        ii.  Upload the video file to the `remote_video_dir`.
-        iii. Upload the JSON file to the `remote_json_dir`.
-        iv.  If any file transfer fails, log the error, close the SFTP connection, and abort the job. The database record will remain in the 'pending' state, and local files will be retried later.
-    d. **Phase 3: Database UPDATE:**
-        i.   If file transfers succeed, execute an `UPDATE` statement on the `events` table for the current `eventId`.
-        ii.  Update the record to set the `status` to `'completed'` and fill in the `remote_video_path` and `remote_json_path` columns.
-        iii. If the `UPDATE` fails, log a critical error (as this indicates an inconsistent state) and abort the job. The retry mechanism will handle it, though it might re-upload the files.
-    e. **Phase 4: Local Cleanup:**
-        i.   **If and only if all previous phases (INSERT, SFTP, UPDATE) have completed successfully**, move the local `.json` and `.mp4` files from the `pending_upload` directory to the `uploaded` directory using `shutil.move`.
+3.  **Failures:**
+
+    *   **Network failures** (no connection, timeout, HTTP 5xx, `429`, or `401`) pause all uploads for 1, 2, 4, ... minutes, up to 60, and do not count against the event. The next pass resumes from the server's offset.
+    *   **Event failures** (any other refusal by the server, or unreadable local files) count against the event. After `event_attempts` failures it is deferred for `deferral_hours`; after `max_deferrals` deferrals it gets a `<event_id>.json.failed` marker. Its files are never deleted, and deleting the marker queues it again.
+    *   Attempt counts, deferrals, and the bytes sent today are kept in `.upload_state.json` in the pending directory, so a restart neither resets the limits nor forgets them.

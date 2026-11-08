@@ -124,47 +124,23 @@ uploader:
   enabled: ${UPLOADER_ENABLED}
 
   # The interval in seconds for the uploader to scan the pending directory for new files.
-  scan_interval_seconds: 60 # (300 seconds = 5 minutes)
+  scan_interval_seconds: 60
 
-  # --- SFTP Server Configuration (for file transfer) ---
-  sftp:
-    # IP address or hostname of your remote cloud server.
-    host: "${SFTP_HOST}"
-    
-    # SFTP port number (usually 22).
-    port: ${SFTP_PORT}
-    
-    # The username for the SFTP connection.
-    username: "${SFTP_USERNAME}"
-    
-    # The absolute path to the private SSH key for passwordless authentication.
-    # Highly recommended over using passwords.
-    ssh_key_path: "${SFTP_SSH_KEY_PATH}"
-    
-    # The absolute path on the remote server where video files should be stored.
-    # The SFTP user must have write permissions to this directory.
-    remote_video_dir: "${SFTP_REMOTE_VIDEO_DIR}"
-    
-    # The absolute path on the remote server where JSON metadata files should be stored.
-    remote_json_dir: "${SFTP_REMOTE_JSON_DIR}"
+  # The FaunaScope server, e.g. https://faunascope.txst.edu, and this device's upload token, issued by the server's administrator. Both are loaded from the .env file.
+  server_url: "${SERVER_URL}"
+  device_token: "${DEVICE_TOKEN}"
 
-  # --- PostgreSQL Database Configuration ---
-  database:
-    # IP address or hostname of your database server. Can be the same as SFTP host.
-    host: "${DB_HOST}"
-    
-    # PostgreSQL port number (usually 5432).
-    port: ${DB_PORT}
-    
-    # The name of the database to connect to.
-    dbname: "${DB_NAME}"
-    
-    # The username for the database connection.
-    user: "${DB_USER}"
-    
-    # The password for the database user.
-    # For production, consider using more secure methods like environment variables.
-    password: "${DB_PASSWORD}"
+  # Videos are sent in chunks of this size. An interrupted upload resumes at the last chunk the server confirmed, so smaller chunks waste less on a poor link.
+  chunk_size_kb: 1024
+
+  # The most video data to send per calendar day, so that a backlog cannot use up the cellular data plan. 800 MB a day suits a 30 GB monthly plan.
+  daily_upload_limit_mb: 800
+
+  # Network failures pause all uploads for 1, 2, 4, ... minutes, up to an hour, and do not count against any event. An event the server rejects is retried event_attempts times, then deferred for deferral_hours; after max_deferrals deferrals it gets a .failed marker (delete the marker to retry it).
+  event_attempts: 3
+  deferral_hours: 24
+  max_deferrals: 3
+  request_timeout_seconds: 60
 
 # =============================================================================
 # Live View Configuration (Optional)

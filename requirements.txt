@@ -18,9 +18,8 @@ scipy
 # AI / Object Detection
 ultralytics         # The official package for running YOLO models for animal detection.
 
-# Database & Networking
-psycopg2-binary     # PostgreSQL database adapter for Python. Used by the uploader to record event metadata.
-paramiko            # A pure Python implementation of the SSHv2 protocol, providing both client and server functionality. Used for SFTP file transfers.
+# Networking
+requests            # HTTP client. Used by the uploader to send events to the server.
 
 # Utilities
 PyYAML              # For parsing the config.yaml file.

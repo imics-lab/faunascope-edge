@@ -457,7 +457,9 @@ class AnimalAnalyzer:
             "detections": detections
         }
         json_path = os.path.join(self.config['output_pending_dir'], f"{event_id}.json")
-        with open(json_path, 'w') as f: json.dump(metadata, f, indent=4)
+        # Written under another name and renamed, so the uploader never reads a half-written file.
+        with open(json_path + '.tmp', 'w') as f: json.dump(metadata, f, indent=4)
+        os.replace(json_path + '.tmp', json_path)
         self.logger.info("  > Wrote JSON metadata to %s", json_path)
 
     def _cleanup_temp_files(self, file_paths: List[str]) -> None:

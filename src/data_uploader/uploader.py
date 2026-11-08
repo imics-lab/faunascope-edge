@@ -1,17 +1,58 @@
 import os
-import posixpath
 import time
 import json
 import shutil
+import hashlib
 import logging
-import psycopg2
-import paramiko
-from typing import Dict, Tuple
+from datetime import date
+from typing import Dict
+
+import requests
+
+# Link failures pause all uploads for 1, 2, 4, ... minutes, up to this many.
+MAX_BACKOFF_MINUTES = 60
+STATE_FILE = '.upload_state.json'
+
+
+class LinkError(Exception):
+    """The server could not be reached or cannot accept uploads right now."""
+
+
+class EventError(Exception):
+    """The server rejected this event, or its local files cannot be read."""
+
+
+class BudgetReached(Exception):
+    """Today's upload budget is spent."""
+
+
+def today() -> str:
+    return date.today().isoformat()
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def response_json(response) -> Dict:
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
 
 class DataUploader:
     """
-    Manages the resilient upload of event packages (video and JSON)
-    to a remote server and database.
+    Uploads event packages (video and JSON) to the FaunaScope server over HTTPS.
+
+    Each event goes through the server's upload API: ask how many bytes of the video the server holds, send the rest in chunks, then send the metadata with the video's size and SHA-256. The server's acceptance of the metadata confirms that the whole event arrived, and only then are the local files moved to uploaded/.
+
+    Link failures pause all uploads with a growing delay and do not count against any event. Event failures count against that event: after event_attempts failures it is deferred for deferral_hours, and after max_deferrals deferrals it gets a .failed marker. Attempt counts, deferrals, and the bytes sent today are kept in a state file in the pending directory, so a restart neither resets the limits nor forgets them.
     """
     def __init__(self, config: Dict):
         """
@@ -24,8 +65,17 @@ class DataUploader:
         self.uploaded_dir = os.path.join(os.path.dirname(self.pending_dir.rstrip('/')), 'uploaded')
         os.makedirs(self.uploaded_dir, exist_ok=True)
 
-        self._upload_failures: Dict[str, int] = {}
-        self._max_upload_retries = 3
+        self.server_url = str(self.config['server_url']).rstrip('/')
+        self.chunk_bytes = int(self.config['chunk_size_kb']) * 1024
+        self.daily_limit_bytes = int(self.config['daily_upload_limit_mb']) * 1024 * 1024
+        self.timeout = self.config['request_timeout_seconds']
+        self.session = requests.Session()
+        self.session.headers['Authorization'] = f"Bearer {self.config['device_token']}"
+
+        self.state_path = os.path.join(self.pending_dir, STATE_FILE)
+        self.state = self._load_state()
+        self.link_failures = 0
+        self.resume_at = 0.0
 
         self.is_running = False
 
@@ -40,16 +90,22 @@ class DataUploader:
             ]
         )
         logger = logging.getLogger('DataUploader')
-        
+
         if not self.config.get('enabled', True):
             logger.info("Data uploader is disabled in configuration. Files will remain in pending_upload folder.")
             return
-        
+
+        for key in ('server_url', 'device_token'):
+            value = str(self.config.get(key) or '')
+            if not value or value.startswith('$'):
+                logger.error("uploader.%s is not set (see SERVER_URL and DEVICE_TOKEN in .env). Files will remain in pending_upload folder.", key)
+                return
+
         if self.is_running:
             logger.warning("Data uploader is already running.")
             return
         self.is_running = True
-        logger.info("Starting Data Uploader...")
+        logger.info("Starting Data Uploader for %s...", self.server_url)
         self._processing_loop()
 
     def stop(self) -> None:
@@ -58,230 +114,169 @@ class DataUploader:
         print("Stopping Data Uploader...")
 
     def _processing_loop(self) -> None:
-        """The main loop for scanning and processing jobs."""
+        """The main loop: one upload pass per scan interval, unless backing off."""
         logger = logging.getLogger('DataUploader')
         while self.is_running:
-            logger.info("Scanning %s for new jobs...", self.pending_dir)
-            try:
-                all_files = set(os.listdir(self.pending_dir))
-                job_files = [f for f in all_files
-                             if f.endswith('.json') and (f + '.failed') not in all_files]
-                if not job_files:
-                    logger.info("No new jobs found.")
-                
-                for job_file in job_files:
-                    if not self.is_running: break
-                    json_path = os.path.join(self.pending_dir, job_file)
-                    self._process_job(json_path)
-
-            except Exception as e:
-                logger.exception("An unexpected error occurred during the scan loop: %s", e)
+            if time.time() >= self.resume_at:
+                try:
+                    self._upload_pending()
+                except Exception as e:
+                    logger.exception("An unexpected error occurred during the upload pass: %s", e)
 
             for _ in range(self.config['scan_interval_seconds']):
                 if not self.is_running: break
                 time.sleep(1)
-    
-    def _record_failure(self, job_key: str, json_path: str, video_path: str, event_id: str, error_msg: str) -> bool:
-        """
-        Records a failure for a job and marks it as permanently failed if max retries exceeded.
-        Returns True if the job was permanently failed, False if it will be retried.
-        """
+
+    def _pending_events(self):
+        """JSON files waiting for upload, oldest first (event IDs start with the time)."""
+        names = set(os.listdir(self.pending_dir))
+        return sorted(f for f in names
+                      if f.startswith('event_') and f.endswith('.json') and (f + '.failed') not in names)
+
+    def _upload_pending(self) -> None:
+        """One pass over the pending events. Stops at a link failure or when the budget is spent."""
         logger = logging.getLogger('DataUploader')
-        count = self._upload_failures.get(job_key, 0) + 1
-        self._upload_failures[job_key] = count
-        if count >= self._max_upload_retries:
-            logger.error(
-                "Giving up on %s after %d failed attempts. Last error: %s. Marking as failed.",
-                job_key, count, error_msg
-            )
-            self._fail_job(json_path, event_id, error_msg)
-            return True
-        logger.error("  > %s (attempt %d/%d). Will retry later.", error_msg, count, self._max_upload_retries)
-        return False
+        for job_file in self._pending_events():
+            if not self.is_running:
+                return
+            if self._bytes_today() >= self.daily_limit_bytes:
+                logger.info("Daily upload budget of %d MB reached; resuming tomorrow.",
+                            self.daily_limit_bytes // (1024 * 1024))
+                return
 
-    def _process_job(self, json_path: str) -> None:
-        """
-        Handles the complete upload transaction for a single event package.
-        Uses two separate DB connections to avoid keeping a connection idle
-        during long SFTP uploads.
-        """
+            event_id = job_file[:-len('.json')]
+            if self.state['events'].get(event_id, {}).get('retry_after', 0) > time.time():
+                continue
+
+            json_path = os.path.join(self.pending_dir, job_file)
+            logger.info("Processing job -> %s", job_file)
+            try:
+                self._upload_event(event_id, json_path)
+            except LinkError as e:
+                self._link_failed(e)
+                return
+            except BudgetReached:
+                logger.info("Daily upload budget reached during %s; resuming tomorrow.", event_id)
+                return
+            except EventError as e:
+                self._event_failed(event_id, json_path, str(e))
+                continue
+
+            logger.info("Server confirmed %s. Moving local files.", event_id)
+            self._move_local_files(json_path, os.path.join(self.pending_dir, event_id + '.mp4'))
+            self.state['events'].pop(event_id, None)
+            self._save_state()
+
+    def _upload_event(self, event_id: str, json_path: str) -> None:
+        """Bring the server to hold the complete event; returns once the server confirms it."""
         logger = logging.getLogger('DataUploader')
-        job_key = os.path.basename(json_path)
-        logger.info("Processing job -> %s", job_key)
-
-        event_id = None
-        video_path = None
-
+        video_path = os.path.join(self.pending_dir, event_id + '.mp4')
         try:
-            # --- Step 1: Read and Validate Local Data ---
             with open(json_path, 'r') as f:
                 metadata = json.load(f)
+            size = os.path.getsize(video_path)
+        except (OSError, ValueError) as e:
+            raise EventError(f"Cannot read the local files: {e}")
 
-            event_id = metadata['eventId']
-            video_path = metadata.get('local_video_path')
-            if not video_path or not os.path.exists(video_path):
-                self._record_failure(
-                    job_key, json_path, None, event_id,
-                    "Video file not found for %s" % json_path
-                )
-                return
+        url = f"{self.server_url}/api/v1/events/{event_id}"
+        response = self._request('GET', url)
+        status = response_json(response)
+        if response.status_code != 200:
+            raise EventError(f"Status query refused: HTTP {response.status_code} {status.get('error', '')}")
+        if status.get('received'):
+            logger.info("  > The server already holds %s.", event_id)
+            return
 
-            # --- Step 2: DB INSERT (Phase 1) ---
-            # Mark the event as 'pending' in the database.
-            # We connect and disconnect immediately.
-            db_conn = None
-            try:
-                db_conn = self._connect_db()
-                with db_conn:
-                    with db_conn.cursor() as cursor:
-                        sql_insert = """
-                            INSERT INTO events (event_id, device_id, timestamp_start_utc, timestamp_end_utc,
-                                                video_duration_seconds, primary_species, status, timezone, latitude, longitude)
-                            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
-                            ON CONFLICT (event_id) DO NOTHING;
-                        """
-                        cursor.execute(sql_insert, (
-                            metadata['eventId'], metadata['deviceId'], metadata['timestamp_start_utc'],
-                            metadata['timestamp_end_utc'], metadata['video_duration_seconds'],
-                            metadata['event_summary']['primary_species'], metadata['location']['timezone'],
-                            metadata['location']['latitude'], metadata['location']['longitude']
-                        ))
-                logger.info("  > DB record ensured in 'pending' state.")
-            except psycopg2.Error as e:
-                self._record_failure(
-                    job_key, json_path, video_path, event_id,
-                    "Failed to ensure DB record: %s" % e
-                )
-                return
-            finally:
-                if db_conn:
-                    db_conn.close()
+        offset = status['offset']
+        if offset:
+            logger.info("  > Resuming at byte %d of %d.", offset, size)
+        with open(video_path, 'rb') as f:
+            while offset < size:
+                n = min(self.chunk_bytes, size - offset)
+                self._spend(n)
+                f.seek(offset)
+                response = self._request('PATCH', url + '/video', data=f.read(n), headers={
+                    'Upload-Offset': str(offset), 'Content-Type': 'application/octet-stream'})
+                body = response_json(response)
+                if response.status_code == 200 or (response.status_code == 409 and 'offset' in body):
+                    offset = body['offset']
+                else:
+                    raise EventError(f"Chunk at byte {offset} refused: HTTP {response.status_code} {body.get('error', '')}")
 
-            # --- Step 3: SFTP UPLOAD (No DB connection open) ---
-            remote_video_name = os.path.basename(video_path)
-            remote_json_name = os.path.basename(json_path)
-            # Use posixpath for SFTP paths (always POSIX-style, regardless of client OS)
-            remote_video_path = posixpath.join(self.config['sftp']['remote_video_dir'], remote_video_name)
-            remote_json_path = posixpath.join(self.config['sftp']['remote_json_dir'], remote_json_name)
+        response = self._request('POST', url, json={
+            'metadata': metadata, 'video_size': size, 'video_sha256': file_sha256(video_path)})
+        if response.status_code not in (200, 201):
+            body = response_json(response)
+            raise EventError(f"Metadata refused: HTTP {response.status_code} {body.get('error', '')}")
 
-            ssh_client = None
-            try:
-                ssh_client, sftp_client = self._connect_sftp()
+    def _request(self, method: str, url: str, **kwargs):
+        """Send one request; raise LinkError when the failure lies with the link or the server."""
+        try:
+            response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+        except requests.RequestException as e:
+            raise LinkError(f"{method} failed: {e}")
+        if response.status_code in (401, 429) or response.status_code >= 500:
+            raise LinkError(f"{method} answered HTTP {response.status_code} {response_json(response).get('error', '')}")
+        self.link_failures = 0
+        return response
 
-                # Smart upload for Video
-                local_video_size = os.path.getsize(video_path)
-                try:
-                    remote_stat = sftp_client.stat(remote_video_path)
-                    if remote_stat.st_size == local_video_size:
-                        logger.info("  > Video already exists on remote server with correct size. Skipping upload.")
-                    else:
-                        logger.warning("  > Remote video size mismatch (%d vs %d). Re-uploading.", remote_stat.st_size, local_video_size)
-                        sftp_client.put(video_path, remote_video_path)
-                except IOError:
-                    logger.info("  > Uploading video to %s...", remote_video_path)
-                    sftp_client.put(video_path, remote_video_path)
+    def _link_failed(self, error: LinkError) -> None:
+        logger = logging.getLogger('DataUploader')
+        self.link_failures += 1
+        minutes = min(2 ** (self.link_failures - 1), MAX_BACKOFF_MINUTES)
+        self.resume_at = time.time() + minutes * 60
+        logger.warning("Link failure (%s). Pausing uploads for %d minute(s).", error, minutes)
 
-                # Smart upload for JSON
-                local_json_size = os.path.getsize(json_path)
-                try:
-                    remote_stat = sftp_client.stat(remote_json_path)
-                    if remote_stat.st_size == local_json_size:
-                        logger.info("  > JSON metadata already exists on remote server. Skipping upload.")
-                    else:
-                        logger.warning("  > Remote JSON size mismatch (%d vs %d). Re-uploading.", remote_stat.st_size, local_json_size)
-                        sftp_client.put(json_path, remote_json_path)
-                except IOError:
-                    logger.info("  > Uploading json to %s...", remote_json_path)
-                    sftp_client.put(json_path, remote_json_path)
+    def _event_failed(self, event_id: str, json_path: str, error_msg: str) -> None:
+        """Count a failure against the event; defer it, and eventually mark it as failed."""
+        logger = logging.getLogger('DataUploader')
+        record = self.state['events'].setdefault(event_id, {'attempts': 0, 'deferrals': 0})
+        record['attempts'] += 1
+        record['last_error'] = error_msg
+        if record['attempts'] < self.config['event_attempts']:
+            logger.error("  > %s (attempt %d/%d). Will retry next pass.",
+                         error_msg, record['attempts'], self.config['event_attempts'])
+        else:
+            record['attempts'] = 0
+            record['deferrals'] += 1
+            if record['deferrals'] < self.config['max_deferrals']:
+                record['retry_after'] = time.time() + self.config['deferral_hours'] * 3600
+                logger.error("  > %s. Deferring %s for %s hours (deferral %d/%d).", error_msg, event_id,
+                             self.config['deferral_hours'], record['deferrals'], self.config['max_deferrals'])
+            else:
+                self._fail_job(json_path, event_id, error_msg)
+                self.state['events'].pop(event_id, None)
+        self._save_state()
 
-            except (paramiko.SSHException, IOError) as e:
-                self._record_failure(
-                    job_key, json_path, video_path, event_id,
-                    "SFTP error: %s" % e
-                )
-                return
-            finally:
-                if ssh_client:
-                    ssh_client.close()
+    def _bytes_today(self) -> int:
+        return self.state['bytes_today'] if self.state['day'] == today() else 0
 
-            # --- Step 4: DB UPDATE (Phase 2) ---
-            # Mark the event as 'completed' and insert detections.
-            db_conn = None
-            try:
-                db_conn = self._connect_db()
-                with db_conn:
-                    with db_conn.cursor() as cursor:
-                        # 4.1 Update main event record
-                        logger.info("  > Updating DB record to 'completed'...")
-                        sql_update = """
-                            UPDATE events
-                            SET status = 'completed', remote_video_path = %s, remote_json_path = %s
-                            WHERE event_id = %s;
-                        """
-                        cursor.execute(sql_update, (remote_video_path, remote_json_path, metadata['eventId']))
+    def _spend(self, nbytes: int) -> None:
+        """Count nbytes against today's budget before sending them; raise BudgetReached if they do not fit."""
+        if self.state['day'] != today():
+            self.state['day'], self.state['bytes_today'] = today(), 0
+        if self.state['bytes_today'] + nbytes > self.daily_limit_bytes:
+            raise BudgetReached()
+        self.state['bytes_today'] += nbytes
+        self._save_state()
 
-                        # 4.2 Insert into detections table
-                        logger.info("  > Inserting detections...")
-                        classes_detected = metadata['event_summary']['species_list']
-                        counts = {}
-                        for det in metadata.get('detections', []):
-                            lbl = det['label']
-                            counts[lbl] = counts.get(lbl, 0) + 1
+    def _load_state(self) -> Dict:
+        try:
+            with open(self.state_path, 'r') as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {'day': today(), 'bytes_today': 0, 'events': {}}
 
-                        sql_insert_det = """
-                            INSERT INTO detections (event_id, detection_json, classes_detected, max_count_per_frame)
-                            VALUES (%s, %s, %s, %s)
-                            ON CONFLICT (event_id) DO NOTHING;
-                        """
-                        cursor.execute(sql_insert_det, (
-                            metadata['eventId'], json.dumps(metadata),
-                            classes_detected, json.dumps(counts)
-                        ))
-
-                # If we get here, everything is done!
-                logger.info("Successfully processed %s. Moving local files.", job_key)
-                self._move_local_files(json_path, video_path)
-                self._upload_failures.pop(job_key, None)
-
-            except psycopg2.Error as e:
-                self._record_failure(
-                    job_key, json_path, video_path, event_id,
-                    "Failed to finalize DB: %s" % e
-                )
-            finally:
-                if db_conn:
-                    db_conn.close()
-
-        except Exception as e:
-            self._record_failure(
-                job_key, json_path, video_path, event_id,
-                "Unexpected error: %s" % e
-            )
-
-    def _connect_db(self):
-        """Establishes and returns a PostgreSQL database connection."""
-        return psycopg2.connect(**self.config['database'])
-
-    def _connect_sftp(self) -> Tuple[paramiko.SSHClient, paramiko.SFTPClient]:
-        """Establishes and returns an SFTP client and its parent SSH client."""
-        ssh_client = paramiko.SSHClient()
-        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        ssh_client.connect(
-            hostname=self.config['sftp']['host'],
-            port=self.config['sftp']['port'],
-            username=self.config['sftp']['username'],
-            key_filename=os.path.expanduser(self.config['sftp']['ssh_key_path'])
-        )
-        sftp_client = ssh_client.open_sftp()
-        return ssh_client, sftp_client
+    def _save_state(self) -> None:
+        with open(self.state_path + '.tmp', 'w') as f:
+            json.dump(self.state, f, indent=2)
+        os.replace(self.state_path + '.tmp', self.state_path)
 
     def _move_local_files(self, json_path: str, video_path: str) -> None:
         """
         Moves successfully uploaded files to the 'uploaded' directory.
         Both pending_upload/ and uploaded/ are bind-mounted, so shutil.move works here.
-        If the move fails, the files stay in pending_upload/ — not a data loss risk
-        since they've already been uploaded to the server and recorded in the DB.
+        If the move fails, the files stay in pending_upload/ — not a data loss risk: the next pass finds that the server already holds the event and tries the move again.
         """
         logger = logging.getLogger('DataUploader')
         try:
@@ -300,24 +295,6 @@ class DataUploader:
         """
         logger = logging.getLogger('DataUploader')
         job_key = os.path.basename(json_path)
-
-        if event_id:
-            db_conn = None
-            try:
-                db_conn = self._connect_db()
-                with db_conn:
-                    with db_conn.cursor() as cursor:
-                        cursor.execute(
-                            "UPDATE events SET status = 'upload_failed' WHERE event_id = %s;",
-                            (event_id,)
-                        )
-                logger.info("  > DB record for %s updated to 'upload_failed'.", event_id)
-            except psycopg2.Error as e:
-                logger.error("Failed to update DB status to 'upload_failed' for %s: %s", event_id, e)
-            finally:
-                if db_conn:
-                    db_conn.close()
-
         marker_path = json_path + '.failed'
         try:
             with open(marker_path, 'w') as f:
@@ -329,5 +306,3 @@ class DataUploader:
         except (IOError, OSError) as e:
             logger.error("  > Could not create failure marker for %s: %s. "
                          "File will be retried on next restart.", job_key, e)
-
-        self._upload_failures.pop(job_key, None)

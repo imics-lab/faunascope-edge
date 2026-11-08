@@ -67,8 +67,8 @@ WORKDIR /app
 RUN python -m pip install --index-url https://pypi.org/simple --no-dependencies ultralytics
 RUN python -m pip install --index-url https://pypi.org/simple matplotlib
 
-# Database & Networking
-RUN python -m pip install --index-url https://pypi.org/simple psycopg2-binary paramiko
+# Networking
+RUN python -m pip install --index-url https://pypi.org/simple requests
 # Utilities
 RUN python -m pip install --index-url https://pypi.org/simple PyYAML
 

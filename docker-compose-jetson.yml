@@ -53,9 +53,6 @@ services:
       # Model weights (REQUIRED - your trained YOLO model)
       - ./model_weight:/app/model_weight:ro
 
-      # SSH key for remote access (writable so entrypoint can fix permissions)
-      - /home/imics/.ssh/azure_vm2_key:/home/FaunaScope/.ssh/azure_vm2_key
-
       # Data directories for output and uploads
       - ./data/pending_upload:/app/data/pending_upload
       - ./data/uploaded:/app/data/uploaded

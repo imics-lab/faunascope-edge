@@ -77,32 +77,6 @@ echo ""
 echo "Fixing permissions on mounted volumes..."
 chown -R FaunaScope:FaunaScope /app/logs /app/data /tmp/FaunaScope_edge_temp 2>/dev/null || true
 
-# Fix SSH key permissions if mounted (must run as root)
-# SSH keys must be owned by the user running the application and have 600 permissions
-# Since bind-mounted files can't have their ownership changed, we copy them to a writable location
-if [ -e "/home/FaunaScope/.ssh" ]; then
-    echo "Fixing SSH key permissions..."
-    # Create a writable SSH directory for the FaunaScope user
-    mkdir -p /home/FaunaScope/.ssh_writable
-    chown FaunaScope:FaunaScope /home/FaunaScope/.ssh_writable
-    chmod 700 /home/FaunaScope/.ssh_writable
-    
-    # Copy all SSH keys from the mounted location to the writable location
-    if [ -f "/home/FaunaScope/.ssh/azure_vm2_key" ]; then
-        cp -f /home/FaunaScope/.ssh/azure_vm2_key /home/FaunaScope/.ssh_writable/
-    fi
-    # Copy other common SSH key formats
-    cp -f /home/FaunaScope/.ssh/*_key /home/FaunaScope/.ssh_writable/ 2>/dev/null || true
-    cp -f /home/FaunaScope/.ssh/id_* /home/FaunaScope/.ssh_writable/ 2>/dev/null || true
-    
-    # Fix ownership and permissions on the writable copies
-    chown -R FaunaScope:FaunaScope /home/FaunaScope/.ssh_writable
-    chmod 700 /home/FaunaScope/.ssh_writable
-    chmod 600 /home/FaunaScope/.ssh_writable/* 2>/dev/null || true
-    
-    echo "SSH keys copied to writable location with correct permissions"
-fi
-
 # Give the application user access to host-mounted Jetson device nodes.
 for DEVICE_PATH in /dev/nvhost* /dev/nvmap /dev/nvidia* /dev/dri/* /dev/video* /dev/media*; do
     if [ -e "$DEVICE_PATH" ]; then

@@ -17,7 +17,7 @@ This approach ensures that the power-hungry GPU and network components are only 
 -   **Efficient Motion Detection:** Uses adaptive background subtraction to filter out environmental noise like wind and changing shadows.
 -   **AI-Powered Species Identification:** Employs a YOLO model to analyze motion events and confirm the presence of target animal species.
 -   **Robust Data Packaging:** Confirmed events are saved as a pair: a high-quality MP4 video and a detailed JSON metadata file.
--   **Resilient Data Upload:** A background process reliably uploads data to a remote server using SFTP and records metadata in a PostgreSQL database, automatically retrying on network failure.
+-   **Resilient Data Upload:** A background process sends each event to the FaunaScope server over HTTPS, in chunks that resume where an interrupted upload stopped. Files stay on the device until the server confirms the whole event, network failures are retried with a growing delay, and a daily limit keeps a backlog from using up the data plan.
 -   **Modular Architecture:** The system is built with three independent processes that communicate safely, ensuring stability and responsiveness.
 
 ## Live View Feature (Optional)
@@ -61,8 +61,7 @@ graph TD
     C --> D(Module B: AnimalAnalyzer);
     D -- Video + JSON --> E["/data/pending_upload/"];
     E --> F(Module C: DataUploader);
-    F -- SFTP --> G[Cloud File Server];
-    F -- SQL --> H[PostgreSQL Database];
+    F -- HTTPS --> G[FaunaScope Server];
 ```
 
 ## Getting Started
@@ -74,7 +73,7 @@ FaunaScope-Edge is primarily intended to run in a Docker container on a CUDA-cap
 -   An NVIDIA Jetson device (or a Linux PC with a CUDA-enabled GPU). **Note:** This application is computationally intensive and requires a CUDA-enabled GPU to run effectively. CPU-only execution is not supported due to poor performance.
 -   A connected camera (USB webcam or CSI camera)
 -   Docker and NVIDIA Container Toolkit installed on the target device
--   Access to a remote server with PostgreSQL and an SFTP user
+-   A device token from the FaunaScope server's administrator (see [Uploading to the Server](#uploading-to-the-server))
 
 ### Docker Deployment
 
@@ -91,9 +90,9 @@ FaunaScope-Edge is primarily intended to run in a Docker container on a CUDA-cap
     -   **Hardware and credentials** (`.env` file):
         ```sh
         cp env.example .env
-        nano .env  # Fill in your camera settings, database credentials, etc.
+        nano .env  # Fill in your camera settings, device location, server URL, and device token
         ```
-        The `.env` file is git-ignored and contains deployment-specific settings like camera resolution, database passwords, and device location.
+        The `.env` file is git-ignored and contains deployment-specific settings like camera resolution, the device token, and device location.
     
     -   **Algorithm parameters** (`config/config.yaml`):
         Edit this file to adjust motion detection thresholds, species of interest, and other algorithm settings. This file is safe to commit to version control.
@@ -129,6 +128,23 @@ docker compose -f docker-compose-jetson.yml down
 
 Running `python main.py` directly is mainly useful for local development or debugging outside the container, and requires manually installing the Python and system dependencies described by the Docker image.
 
+## Uploading to the Server
+
+The server accepts events only from registered devices. Its administrator registers each device with `flask device add <DEVICE_ID>`, which prints the device's token once. Put the token and the server's address in `.env`, with `DEVICE_ID` set to the registered name, and set `UPLOADER_ENABLED=true`:
+
+```sh
+SERVER_URL=https://faunascope.txst.edu
+DEVICE_TOKEN=<the token>
+```
+
+To check the token before deploying, ask the server about an event it has never seen. A valid token gets `{"offset":0,"received":false}`; an invalid one gets `401`:
+
+```sh
+curl -H "Authorization: Bearer $DEVICE_TOKEN" $SERVER_URL/api/v1/events/event_20000101-000000_00000000
+```
+
+The uploader sends the oldest events first and moves an event to `data/uploaded/` only after the server confirms it. When the network or server is unavailable, it pauses for 1, 2, 4, ... minutes, up to an hour. An event the server rejects is retried three times, then deferred for a day; after three deferrals it gets a `.failed` marker next to its JSON in `data/pending_upload/`, and deleting the marker queues it again. Files are never deleted. The upload settings, including the daily limit (`daily_upload_limit_mb`, 800 MB by default), are in the `uploader` section of `config/config.yaml`, and the uploader's progress is kept in `data/pending_upload/.upload_state.json`.
+
 ## Project Structure
 
 -   **`main.py`**: The main entry point that initializes and runs all modules.
@@ -148,7 +164,6 @@ Running `python main.py` directly is mainly useful for local development or debu
 The `scripts/` directory contains tools to help test parts of the system in isolation:
 -   `test_camera.py`: Verify that your camera is detected and working correctly.
 -   `test_yolo.py`: Run the YOLO model on a test image or video to confirm it's functional.
--   `test_db_connection.py`: Check if the application can connect to your remote PostgreSQL database with the provided credentials.
 -   `test_detector.py`: Test motion detection module functionality using a video file.
 
 The unit tests in `tests/` run without a camera, a GPU, or a server. They need `ffmpeg` on the PATH and the Python packages in `requirements-dev.txt`:

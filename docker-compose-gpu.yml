@@ -61,12 +61,6 @@ services:
       # Model weights (REQUIRED - your trained YOLO model)
       - ./model_weight:/app/model_weight:ro
 
-      # SSH key for remote access (OPTIONAL - only needed for SFTP uploads)
-      # Uncomment and adjust the path to match your SSH private key location
-      # Note: Do NOT use :ro flag - entrypoint needs to fix permissions
-      # Example: - ~/.ssh/id_rsa:/home/FaunaScope/.ssh/id_rsa
-      # - ~/.ssh/your_key:/home/FaunaScope/.ssh/your_key
-
       # Data directories for output and uploads
       - ./data/pending_upload:/app/data/pending_upload
       - ./data/uploaded:/app/data/uploaded
