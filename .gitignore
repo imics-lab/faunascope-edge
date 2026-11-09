@@ -212,4 +212,7 @@ logs/*.log
 llm_interaction_log.md
 
 # TensorRT engines built on the device
-data/detector_cache/
+data/engine_cache/
+
+# SpeciesNet, downloaded from the releases (see README)
+model_weight/speciesnet/

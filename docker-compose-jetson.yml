@@ -57,8 +57,10 @@ services:
       - ./data/pending_upload:/app/data/pending_upload
       - ./data/uploaded:/app/data/uploaded
       - ./data/temp_debug:/app/data/temp_debug
-      # TensorRT engine built from the model on the first start
-      - ./data/detector_cache:/app/data/detector_cache
+      # Events SpeciesNet calls blank, kept on the device instead of uploaded
+      - ./data/held_blank:/app/data/held_blank
+      # TensorRT engines built from the models on the first start
+      - ./data/engine_cache:/app/data/engine_cache
 
       # Logs directory for persistent logging
       - ./logs:/app/logs

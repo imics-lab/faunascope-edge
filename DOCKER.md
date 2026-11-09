@@ -99,7 +99,7 @@ For desktop/server machines with standard NVIDIA GPUs (RTX, Tesla, A100, etc.):
     Ensure `config/config.yaml` exists and is properly configured for your camera and device settings. See the main `README.md` for more details.
 
 3.  **Ensure model weights are present**:
-    The detector, `model_weight/MDV6-mit-yolov9-c.onnx`, comes with the repository.
+    The detector, `model_weight/MDV6-mit-yolov9-c.onnx`, comes with the repository; download the species classifier into `model_weight/speciesnet/` as described in the main `README.md`.
 
 4.  **Build and run**:
     ```bash
@@ -137,7 +137,7 @@ For NVIDIA Jetson devices (Jetson Nano, Jetson Orin, etc.):
     Ensure `config/config.yaml` exists and is properly configured for your camera and device settings. See the main `README.md` for more details.
 
 3.  **Ensure model weights are present**:
-    The detector, `model_weight/MDV6-mit-yolov9-c.onnx`, comes with the repository.
+    The detector, `model_weight/MDV6-mit-yolov9-c.onnx`, comes with the repository; download the species classifier into `model_weight/speciesnet/` as described in the main `README.md`.
 
 4.  **Build and run**:
     ```bash

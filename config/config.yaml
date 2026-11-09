@@ -54,8 +54,6 @@ animal_analyzer:
   # MegaDetector V6 (MDV6-mit-yolov9-c) in ONNX form; scripts/export_megadetector.py makes it from the published checkpoint.
   detector_model_path: "model_weight/MDV6-mit-yolov9-c.onnx"
 
-  # On a GPU with TensorRT, the first start converts the model into a TensorRT engine (about 8 minutes on a Jetson Orin Nano) and keeps it here; later starts take seconds.
-  detector_engine_cache_dir: "data/detector_cache/"
 
   # MegaDetector's classes are animal, person, and vehicle. An event is kept when a track of one of these classes is confirmed.
   trigger_classes: ['animal', 'person']
@@ -73,6 +71,19 @@ animal_analyzer:
   track_match_iou: 0.3
   track_max_missed_detections: 2
 
+  # SpeciesNet, the species classifier: the files scripts/export_speciesnet.py writes, published as a release of this repository (see README).
+  classifier_model_dir: "model_weight/speciesnet/"
+
+  # Each confirmed track is classified from this many of its most confident detections.
+  classification_crops: 5
+
+  # SpeciesNet accepts a species only where its geofence allows it: an ISO 3166-1 alpha-3 country code and a two-letter state code.
+  geofence_country: "USA"
+  geofence_admin1_region: "TX"
+
+  # On a GPU with TensorRT, the first start converts both models into TensorRT engines (about 8 minutes for MegaDetector and 10 for SpeciesNet on a Jetson Orin Nano) and keeps them here; later starts take seconds.
+  engine_cache_dir: "data/engine_cache/"
+
   # The maximum number of full-resolution frames to hold in RAM at one time.
   # If an event is longer than this, frames will be temporarily written to disk
   # to prevent running out of memory.
@@ -80,6 +91,9 @@ animal_analyzer:
 
   # The local directory where final video/JSON packages are placed before upload.
   output_pending_dir: "data/pending_upload/"
+
+  # Events in which SpeciesNet calls every animal and person track blank are kept here and not uploaded.
+  output_held_dir: "data/held_blank/"
 
   # --- Debugging Options ---
   # Set to true to save all motion events (even insignificant ones) for manual inspection.

@@ -13,7 +13,17 @@ from collections import Counter
 from datetime import datetime, timezone
 
 from .megadetector import MegaDetector
+from .species_classifier import SpeciesClassifier
 from .tracker import BoxTracker
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
 
 class AnimalAnalyzer:
     """
@@ -21,6 +31,8 @@ class AnimalAnalyzer:
     and packages significant events as video and JSON metadata files.
 
     MegaDetector runs on every detection_interval_frames-th frame of an event, starting with the first, and a tracker follows its boxes through the frames in between. An event is significant once a track of one of the trigger_classes has been detected in confirmation_detections detection frames; only confirmed tracks are written to the metadata.
+
+    When a significant event ends, SpeciesNet classifies each confirmed track from its classification_crops most confident detections. If it calls every confirmed track of the trigger_classes blank, the event goes to output_held_dir, which is not uploaded, instead of output_pending_dir.
     """
 
     def __init__(self, shared_queue: Queue, config: Dict):
@@ -37,9 +49,11 @@ class AnimalAnalyzer:
         self.output_fps = self.config.get('output_fps', 30.0) 
         self.is_running = False
 
-        # The detector is loaded in start(), in the analyzer's own process (required for 'spawn' multiprocessing)
+        # The models are loaded in start(), in the analyzer's own process (required for 'spawn' multiprocessing)
         self.detector = None
         self.detector_info = {}
+        self.classifier = None
+        self.classifier_info = {}
 
         # Track which video codec works on this system (will be detected on first write)
         self.working_codec = None
@@ -51,6 +65,7 @@ class AnimalAnalyzer:
 
         # --- Ensure Directories Exist ---
         os.makedirs(self.config['output_pending_dir'], exist_ok=True)
+        os.makedirs(self.config['output_held_dir'], exist_ok=True)
         os.makedirs(self.config['output_temp_dir'], exist_ok=True)
         os.makedirs(self.config['debug_temp_dir'], exist_ok=True)
         print(f"Output directories ensured: {self.config['output_pending_dir']}, {self.config['output_temp_dir']}, and {self.config['debug_temp_dir']}")
@@ -73,9 +88,8 @@ class AnimalAnalyzer:
         
         model_path = self.config['detector_model_path']
         self.logger.info("Loading MegaDetector from %s...", model_path)
-        self.detector = MegaDetector(model_path, self.config['confidence_threshold'], self.config['detector_engine_cache_dir'])
-        with open(model_path, 'rb') as f:
-            model_sha256 = hashlib.sha256(f.read()).hexdigest()
+        self.detector = MegaDetector(model_path, self.config['confidence_threshold'], self.config['engine_cache_dir'])
+        model_sha256 = file_sha256(model_path)
         self.detector_info = {
             "model": os.path.basename(model_path),
             "model_sha256": model_sha256,
@@ -84,6 +98,18 @@ class AnimalAnalyzer:
             "confirmation_detections": self.config['confirmation_detections'],
         }
         self.logger.info("MegaDetector loaded (sha256 %s).", model_sha256[:12])
+
+        model_dir = self.config['classifier_model_dir']
+        self.logger.info("Loading SpeciesNet from %s...", model_dir)
+        self.classifier = SpeciesClassifier(model_dir, self.config['engine_cache_dir'],
+                                            self.config['geofence_country'], self.config['geofence_admin1_region'])
+        self.classifier_info = {
+            "model": f"SpeciesNet {self.classifier.version}",
+            "model_sha256": file_sha256(os.path.join(model_dir, 'speciesnet.onnx')),
+            "crops_per_track": self.config['classification_crops'],
+            "geofence": f"{self.config['geofence_country']}-{self.config['geofence_admin1_region']}",
+        }
+        self.logger.info("SpeciesNet %s loaded.", self.classifier.version)
         
         if self.is_running:
             self.logger.warning("Animal analyzer is already running.")
@@ -118,6 +144,7 @@ class AnimalAnalyzer:
             tracker = BoxTracker(self.config['track_match_iou'], self.config['track_max_missed_detections'])
             confirmed_tracks = set()
             boxes_by_track = {}
+            crops_by_track = {}
             significant_event_detected = False
             frame_index = 0
             frame = first_frame
@@ -142,6 +169,8 @@ class AnimalAnalyzer:
                         "detected": track.detected,
                         "box_xywh": [int((x1 + x2) / 2), int((y1 + y2) / 2), int(x2 - x1), int(y2 - y1)]
                     })
+                    if track.detected:
+                        self._keep_crop(crops_by_track.setdefault(track.track_id, []), track.confidence, frame, track.box)
                     if track.hits >= self.config['confirmation_detections'] and track.track_id not in confirmed_tracks:
                         confirmed_tracks.add(track.track_id)
                         self.logger.info("  > Confirmed %s (track %s)", track.label, track.track_id)
@@ -174,11 +203,18 @@ class AnimalAnalyzer:
             ram_buffer.clear()
 
             if significant_event_detected and temp_file_parts:
-                self.logger.info("Significant event! Packaging video and metadata for %s.", event_id)
-                final_video_path = self._concatenate_parts(event_id, temp_file_parts)
+                classifications = self._classify_tracks(confirmed_tracks, boxes_by_track, crops_by_track)
+                triggers = [c for c in classifications if c['detector_label'] in self.config['trigger_classes']]
+                if triggers and all(c['blank'] for c in triggers):
+                    output_dir = self.config['output_held_dir']
+                    self.logger.info("SpeciesNet calls every track blank. Holding %s in %s.", event_id, output_dir)
+                else:
+                    output_dir = self.config['output_pending_dir']
+                    self.logger.info("Significant event! Packaging video and metadata for %s.", event_id)
+                final_video_path = self._concatenate_parts(event_id, temp_file_parts, output_dir)
                 if final_video_path:
                     actual_duration = self._get_video_duration(final_video_path)
-                    self._create_json_metadata(event_id, final_video_path, all_confirmed_detections, event_start_time, event_end_time, actual_duration)
+                    self._create_json_metadata(event_id, final_video_path, all_confirmed_detections, classifications, event_start_time, event_end_time, actual_duration, output_dir)
             else:
                 if self.config.get('debug_mode', False):
                     self.logger.info("Insignificant event or no frames. Moving temporary files to debug directory for %s.", event_id)
@@ -187,6 +223,30 @@ class AnimalAnalyzer:
                     self.logger.info("Insignificant event or no frames. Cleaning up temporary files for %s.", event_id)
                     self._cleanup_temp_files(temp_file_parts)
     
+    def _keep_crop(self, crops: List, confidence: float, frame, box) -> None:
+        """Keep a track's classification_crops most confident detections as classifier crops."""
+        x1, y1, x2, y2 = box
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return
+        if len(crops) < self.config['classification_crops'] or confidence > crops[-1][0]:
+            crops.append((confidence, SpeciesClassifier.crop(frame, box)))
+            crops.sort(key=lambda c: -c[0])
+            del crops[self.config['classification_crops']:]
+
+    def _classify_tracks(self, track_ids, boxes_by_track: Dict, crops_by_track: Dict) -> List[Dict]:
+        """SpeciesNet's result for each confirmed track, in track order."""
+        classifications = []
+        for track_id in sorted(track_ids):
+            crops = crops_by_track.get(track_id)
+            if not crops:
+                continue
+            boxes = boxes_by_track[track_id]
+            label = boxes[0]['label']
+            result = self.classifier.classify([crop for _, crop in crops], label, max(confidence for confidence, _ in crops))
+            classifications.append({"track_id": track_id, "detector_label": label, "crops": len(crops), **result})
+            self.logger.info("  > Track %s (%s): %s (%.2f, %s)", track_id, label, result['prediction'], result['score'], result['source'])
+        return classifications
+
     def _save_for_debug(self, file_paths: List[str]) -> None:
         """Moves temporary files to a persistent debug directory instead of deleting them."""
         for path in file_paths:
@@ -277,7 +337,7 @@ class AnimalAnalyzer:
         )
         return ""
 
-    def _concatenate_parts(self, event_id: str, temp_parts: List[str]) -> str:
+    def _concatenate_parts(self, event_id: str, temp_parts: List[str], output_dir: str) -> str:
         if not temp_parts:
             return ""
         
@@ -287,7 +347,7 @@ class AnimalAnalyzer:
             self.logger.error("No valid temporary video parts found for event %s", event_id)
             return ""
         
-        final_video_path = os.path.join(self.config['output_pending_dir'], f"{event_id}.mp4")
+        final_video_path = os.path.join(output_dir, f"{event_id}.mp4")
         file_list_path = os.path.join(self.config['output_temp_dir'], f"{event_id}_filelist.txt")
         
         with open(file_list_path, 'w') as f:
@@ -328,13 +388,12 @@ class AnimalAnalyzer:
                 pass
             return ""
 
-    def _create_json_metadata(self, event_id: str, video_path: str, detections: List, start_time: float, end_time: float, actual_duration: float) -> None:
-        species_counts = Counter(d['label'] for d in detections)
-        unique_species = list(species_counts.keys())
-        if species_counts:
-            primary = species_counts.most_common(1)[0][0]
-        else:
-            primary = "N/A"
+    def _create_json_metadata(self, event_id: str, video_path: str, detections: List, classifications: List, start_time: float, end_time: float, actual_duration: float, output_dir: str) -> None:
+        # Species of the tracks SpeciesNet does not call blank, the track with the most boxes first.
+        boxes_per_track = Counter(d['track_id'] for d in detections)
+        named = sorted((c for c in classifications if not c['blank']), key=lambda c: -boxes_per_track[c['track_id']])
+        unique_species = list(dict.fromkeys(c['prediction'] for c in named))
+        primary = unique_species[0] if unique_species else "blank"
         metadata = {
             "eventId": event_id,
             "deviceId": self.device_id,
@@ -353,9 +412,11 @@ class AnimalAnalyzer:
                 "max_confidence": max((d['confidence'] for d in detections), default=0.0)
             },
             "detector": self.detector_info,
+            "classifier": self.classifier_info,
+            "classifications": classifications,
             "detections": detections
         }
-        json_path = os.path.join(self.config['output_pending_dir'], f"{event_id}.json")
+        json_path = os.path.join(output_dir, f"{event_id}.json")
         # Written under another name and renamed, so the uploader never reads a half-written file.
         with open(json_path + '.tmp', 'w') as f: json.dump(metadata, f, indent=4)
         os.replace(json_path + '.tmp', json_path)

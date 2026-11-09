@@ -1,0 +1,1 @@
+"""The rules by which the SpeciesNet ensemble combines MegaDetector and classifier outputs (thresholds, geofencing, taxonomic roll-up). Copied from Google's speciesnet package 5.0.6 (https://github.com/google/cameratrapai, Apache-2.0) with the imports made relative."""
