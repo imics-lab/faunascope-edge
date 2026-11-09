@@ -28,11 +28,11 @@ Every request goes to `<SERVER_URL>/api/v1/events/<event_id>` with the header `A
 |---|---|---|
 | 1. Ask | `GET /api/v1/events/<event_id>` | `{"received": true}` if it already holds the event, otherwise `{"received": false, "offset": n}`, the number of bytes of the video it holds |
 | 2. Send the video | `PATCH /api/v1/events/<event_id>/video`, header `Upload-Offset: n`, body: the next chunk (`chunk_size_kb`, 1 MB; the server accepts up to 2 MB) | `200 {"offset": n + length}`, or `409 {"offset": m}` if it holds a different number of bytes, in which case the device continues from `m` |
-| 3. Finish | `POST /api/v1/events/<event_id>` with `{"metadata": <the JSON>, "video_size": N, "video_sha256": "<hex>"}` | `201` after it has checked the size, checksum, and playability of the video and stored both files; `200` if it already held the event; `409 {"offset": m}` if the video is incomplete; `422` if the video does not match |
+| 3. Finish | `POST /api/v1/events/<event_id>` with `{"metadata": <the JSON>, "video_size": N, "video_sha256": "<hex>"}`, gzipped (`Content-Encoding: gzip`) | `201` after it has checked the size, checksum, and playability of the video and stored both files; `200` if it already held the event; `409 {"offset": m}` if the video is incomplete; `422` if the video does not match |
 
 Only after `200` or `201` does the uploader move the event's two files to `data/uploaded/`. If a connection drops in the middle of a chunk, the next attempt asks again and resumes from the server's offset, so at most one chunk is sent twice. If the server's `201` is lost on the way back, the repeated `POST` gets `200`. If the move to `uploaded/` fails, the files stay in the pending folder and the next pass finds that the server already holds the event.
 
-The server also limits each device to a daily volume (2 GB by default) and each address to 10 requests a second.
+The metadata is sent gzipped because it can be large: in the archive, half the events have less than 0.2 MB of metadata, but an event with many tracks reaches 7 MB, beyond the server's 2 MB limit per request. Compressed, the largest is 0.17 MB. The server also limits each device to a daily volume (2 GB by default) and each address to 10 requests a second; the uploader leaves at least 0.2 seconds between requests, so even on a fast link it stays under that limit.
 
 ## Retries
 

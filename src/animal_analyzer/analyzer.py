@@ -418,7 +418,7 @@ class AnimalAnalyzer:
         }
         json_path = os.path.join(output_dir, f"{event_id}.json")
         # Written under another name and renamed, so the uploader never reads a half-written file.
-        with open(json_path + '.tmp', 'w') as f: json.dump(metadata, f, indent=4)
+        with open(json_path + '.tmp', 'w') as f: json.dump(metadata, f, separators=(',', ':'))
         os.replace(json_path + '.tmp', json_path)
         self.logger.info("  > Wrote JSON metadata to %s", json_path)
 

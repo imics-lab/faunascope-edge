@@ -2,6 +2,7 @@
 
 The fake server keeps uploads in memory and can be told to fail particular requests: drop the connection without answering, answer with an error status, refuse a chunk for its offset, or store a chunk or an event and then drop the confirmation.
 """
+import gzip
 import hashlib
 import json
 import os
@@ -25,6 +26,7 @@ class FakeServer(ThreadingHTTPServer):
         self.stored = {}     # event_id -> (video, metadata)
         self.faults = []     # (method, action) or (method, action, event_id), each used by the first matching request
         self.log = []        # (method, event_id, Upload-Offset or None, status)
+        self.metadata_bytes = {}  # event_id -> size of the metadata request as sent
 
     def take_fault(self, method, event_id):
         for i, fault in enumerate(self.faults):
@@ -86,6 +88,9 @@ class Handler(BaseHTTPRequestHandler):
                 return 409, {"error": "offset mismatch", "offset": len(held)}
             server.partial[event_id] = held + body
             return 200, {"offset": len(held) + len(body)}
+        server.metadata_bytes[event_id] = len(body)
+        if self.headers.get("Content-Encoding") == "gzip":
+            body = gzip.decompress(body)
         request = json.loads(body)
         if event_id in server.stored:
             return 200, {"received": True}
@@ -118,8 +123,10 @@ def server():
 
 
 @pytest.fixture
-def make_uploader(config, server):
-    """Build an uploader for the fake server; keyword arguments override uploader settings."""
+def make_uploader(config, server, monkeypatch):
+    """Build an uploader for the fake server; keyword arguments override uploader settings. Requests are not paced unless a test asks for it."""
+    monkeypatch.setattr(uploader_module, "MIN_REQUEST_INTERVAL_SECONDS", 0)
+
     def make(**settings):
         config["uploader"] = {
             "enabled": True,
@@ -359,3 +366,29 @@ def test_failed_markers_and_the_state_file_are_not_uploaded(make_uploader, serve
     up._upload_pending()
 
     assert server.log == []
+
+
+def test_the_metadata_is_sent_gzipped(make_uploader, server):
+    up = make_uploader()
+    _, metadata = add_event(up.pending_dir, EVENT, 10 * KB)
+    metadata["detections"] = [{"frame_index": i, "track_id": i % 7, "label": "animal", "confidence": 0.9,
+                               "detected": i % 5 == 0, "box_xywh": [320, 240, 80, 60]} for i in range(20000)]
+    with open(os.path.join(up.pending_dir, EVENT + ".json"), "w") as f:
+        json.dump(metadata, f)
+
+    up._upload_pending()
+
+    assert server.stored[EVENT][1] == metadata
+    assert server.metadata_bytes[EVENT] < len(json.dumps(metadata)) / 10
+
+
+def test_requests_are_paced_to_the_servers_rate_limit(make_uploader, server, monkeypatch):
+    up = make_uploader()
+    monkeypatch.setattr(uploader_module, "MIN_REQUEST_INTERVAL_SECONDS", 0.1)
+    add_event(up.pending_dir, EVENT, 200 * KB)
+
+    started = time.monotonic()
+    up._upload_pending()
+
+    # GET, four chunks, and POST: five intervals between six requests.
+    assert len(server.log) == 6 and time.monotonic() - started >= 0.5

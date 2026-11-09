@@ -1,4 +1,5 @@
 import os
+import gzip
 import time
 import json
 import shutil
@@ -11,6 +12,8 @@ import requests
 
 # Link failures pause all uploads for 1, 2, 4, ... minutes, up to this many.
 MAX_BACKOFF_MINUTES = 60
+# The server admits 10 requests a second from one address; on a fast link, chunks sent back to back would exceed that and be refused.
+MIN_REQUEST_INTERVAL_SECONDS = 0.2
 STATE_FILE = '.upload_state.json'
 
 
@@ -76,6 +79,7 @@ class DataUploader:
         self.state = self._load_state()
         self.link_failures = 0
         self.resume_at = 0.0
+        self.last_request_at = 0.0
 
         self.is_running = False
 
@@ -204,14 +208,21 @@ class DataUploader:
                 else:
                     raise EventError(f"Chunk at byte {offset} refused: HTTP {response.status_code} {body.get('error', '')}")
 
-        response = self._request('POST', url, json={
-            'metadata': metadata, 'video_size': size, 'video_sha256': file_sha256(video_path)})
+        # A long event with many tracks has several megabytes of metadata; gzip makes it about 40 times smaller, well under the server's 2 MB request limit.
+        body = json.dumps({'metadata': metadata, 'video_size': size, 'video_sha256': file_sha256(video_path)},
+                          separators=(',', ':'))
+        response = self._request('POST', url, data=gzip.compress(body.encode()), headers={
+            'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
         if response.status_code not in (200, 201):
             body = response_json(response)
             raise EventError(f"Metadata refused: HTTP {response.status_code} {body.get('error', '')}")
 
     def _request(self, method: str, url: str, **kwargs):
         """Send one request; raise LinkError when the failure lies with the link or the server."""
+        wait = self.last_request_at + MIN_REQUEST_INTERVAL_SECONDS - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self.last_request_at = time.monotonic()
         try:
             response = self.session.request(method, url, timeout=self.timeout, **kwargs)
         except requests.RequestException as e:
