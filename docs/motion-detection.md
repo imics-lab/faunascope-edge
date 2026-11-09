@@ -25,7 +25,7 @@ The detector is either `IDLE` or `DETECTING`.
 - In `IDLE`, the first frame with motion starts an event: the state becomes `DETECTING` and the full-resolution frame goes into the queue.
 - In `DETECTING`, every frame goes into the queue, with or without motion, so an animal that stands still for a moment is not cut out. Each frame with motion restarts the cooldown. When `motion_cooldown_seconds` (20) pass without motion, the detector puts `None` into the queue, which ends the event, and returns to `IDLE`.
 
-An event therefore reaches the analyzer as `[frame, frame, ..., frame, None]`, each frame a BGR `numpy` array at the camera's resolution.
+An event therefore reaches the analyzer as `[item, item, ..., item, None]`. Each item is `(frame, read_at, boot_seconds, motion)`: the frame as a BGR `numpy` array at the camera's resolution; the time it was read from the camera, as UTC seconds and as seconds since boot (`CLOCK_BOOTTIME`, which a change to the system clock does not affect); and whether this frame showed motion. The analyzer takes the event's times and frame rate from these readings (see [Event metadata](metadata.md#time)). The detector also records when the camera last delivered a frame, which the heartbeat counts as camera operating time.
 
 The queue is unbounded. If the analyzer falls behind for long, frames accumulate in memory; bounding the queue is an open item.
 

@@ -74,7 +74,7 @@ class SpeciesClassifier:
         return cv2.cvtColor(cv2.resize(region, (CROP_SIZE, CROP_SIZE), interpolation=cv2.INTER_LINEAR), cv2.COLOR_BGR2RGB)
 
     def classify(self, crops: List[np.ndarray], detector_label: str, detector_confidence: float) -> Dict:
-        """Classify one track from its crops."""
+        """Classify one track from its crops: the label the ensemble chose (taxon) and its common name, and the classifier's five most probable labels (top)."""
         batch = np.stack(crops).astype(np.float32) / 255.0
         logits = np.concatenate([self.session.run(None, {'crops': batch[i:i + MAX_BATCH]})[0]
                                  for i in range(0, len(batch), MAX_BATCH)])
@@ -90,10 +90,10 @@ class SpeciesClassifier:
             taxonomy_map=self.taxonomy_map, geofence_map=self.geofence_map, enable_geofence=True,
             geofence_fn=geofence_animal_classification, roll_up_fn=roll_up_labels_to_first_matching_level)
         return {
-            'prediction': common_name(result['class']),
-            'taxonomy': result['class'],
+            'taxon': result['class'],
+            'name': common_name(result['class']),
             'score': round(float(result['score']), 4),
             'source': result['source'],
             'blank': result['class'] == Classification.BLANK,
-            'top_classes': [{'label': common_name(c), 'score': round(s, 4)} for c, s in zip(classes, scores)],
+            'top': [{'taxon': c, 'score': round(s, 4)} for c, s in zip(classes, scores)],
         }

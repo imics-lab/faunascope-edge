@@ -55,7 +55,7 @@ The first start converts both models for the GPU, which takes about 20 minutes o
 | [Overview](docs/README.md) | How an event is made, and the folders on the device |
 | [Motion detection](docs/motion-detection.md) | Background subtraction, events, camera input, live view |
 | [Animal analysis](docs/analysis.md) | MegaDetector, tracking, SpeciesNet, held events, speed on the Jetson |
-| [Event metadata](docs/metadata.md) | The JSON file written for each event |
+| [Event metadata](docs/metadata.md) | The JSON file written for each event, and the hourly heartbeat |
 | [Uploading](docs/uploading.md) | The upload protocol, retries, the daily budget, device tokens |
 | [Models](docs/models.md) | Model sources, licenses, conversion, and validation |
 | [Deployment](docs/deployment.md) | Installing and running the device with Docker |

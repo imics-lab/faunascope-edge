@@ -12,12 +12,13 @@ pytest
 | File | What it checks |
 |---|---|
 | `test_config.py` | Loading `config.yaml` with values from `.env`; the committed configuration parses. One test is an expected failure that documents an open problem: an unset variable stays in the configuration as literal text |
-| `test_motion_detector.py` | Resizing and grayscale conversion for motion analysis, and the minimum area of a moving region |
+| `test_motion_detector.py` | Resizing and grayscale conversion for motion analysis, the minimum area of a moving region, and the frames, read times, and motion flags an event sends to the analyzer |
 | `test_megadetector.py` | MegaDetector's padding, scaling of boxes back to the frame, and per-class suppression, with a stand-in for the model |
 | `test_tracker.py` | Track creation, matching by class and overlap, missed detections, and following a textured box with optical flow |
 | `test_species_classifier.py` | Averaging over crops, batching, geofencing, taxonomic roll-up, the blank threshold, and the person rule, with a stand-in model and a small label set |
-| `test_analyzer_event.py` | A whole event through the analyzer with scripted detections and species: which frames are checked, which tracks are written, the video and metadata produced, and held events |
-| `test_uploader.py` | The uploader against an in-process fake server that can drop connections, refuse requests, or misreport offsets: resuming, back-off, deferral, `.failed` markers, the daily budget, and the rule that files move only after confirmation |
+| `test_analyzer_event.py` | A whole event through the analyzer with scripted detections and species: which frames are checked, which tracks are written, the video (at the measured frame rate) and metadata produced, species counts, and held events |
+| `test_heartbeat.py` | Operating time from the camera's and the analyzer's state, the heartbeat file and its counts, and the clock and commit reported |
+| `test_uploader.py` | The uploader against an in-process fake server that can drop connections, refuse requests, or misreport offsets: resuming, back-off, deferral, `.failed` markers, the daily budget, the rule that files move only after confirmation, and heartbeats |
 
 ## Running on recorded video
 
@@ -29,7 +30,7 @@ Three ways to run the pipeline on video files instead of the camera:
   ```sh
   python scripts/replay_archive.py --videos <folder> --output <results folder> --workers 8
   ```
-  It writes one JSON file per video with the outcome (`uploaded`, `held`, or `discarded`), the classifications, the boxes, and every MegaDetector detection down to `--raw-threshold` (0.1) on the detection frames, so other confidence thresholds and tracking settings can be tried later without running the detector again. Existing results are skipped, so an interrupted run can be restarted. This is how the edge models are compared with the server's archive.
+  It writes one JSON file per video with the outcome (`uploaded`, `held`, or `discarded`), the metadata the analyzer would write (with frame times taken from the video's frame rate), and every MegaDetector detection down to `--raw-threshold` (0.1) on the detection frames, so other confidence thresholds and tracking settings can be tried later without running the detector again. Existing results are skipped, so an interrupted run can be restarted. This is how the edge models are compared with the server's archive.
 
 ## Helper scripts
 

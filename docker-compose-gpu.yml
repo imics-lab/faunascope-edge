@@ -33,6 +33,8 @@ services:
         # PyTorch 1.13.1 + CUDA 11.x + cuDNN 8.x
         # Change this to the latest version of the image if you have a newer GPU
         BASE_IMAGE: nvcr.io/nvidia/pytorch:22.12-py3
+        # Set by FAUNASCOPE_COMMIT=$(git rev-parse --short HEAD) docker compose ... up --build
+        FAUNASCOPE_COMMIT: ${FAUNASCOPE_COMMIT:-}
         # Use the latest version of the image if you have a newer GPU
         # BASE_IMAGE: nvcr.io/nvidia/pytorch:24.12-py3
 

@@ -1,5 +1,7 @@
 """The uploader against a fake server that speaks the FaunaScope upload API.
 
+Heartbeats go to /api/v1/heartbeats, which the fake server logs with "heartbeats" in place of the event ID.
+
 The fake server keeps uploads in memory and can be told to fail particular requests: drop the connection without answering, answer with an error status, refuse a chunk for its offset, or store a chunk or an event and then drop the confirmation.
 """
 import gzip
@@ -27,6 +29,7 @@ class FakeServer(ThreadingHTTPServer):
         self.faults = []     # (method, action) or (method, action, event_id), each used by the first matching request
         self.log = []        # (method, event_id, Upload-Offset or None, status)
         self.metadata_bytes = {}  # event_id -> size of the metadata request as sent
+        self.heartbeats = []      # heartbeats received
 
     def take_fault(self, method, event_id):
         for i, fault in enumerate(self.faults):
@@ -50,7 +53,8 @@ class Handler(BaseHTTPRequestHandler):
     def handle_one(self, method):
         server = self.server
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        event_id = self.path.split("/")[4]
+        parts = self.path.split("/")
+        event_id = parts[4] if len(parts) > 4 else parts[3]
         offset = self.headers.get("Upload-Offset")
         fault = server.take_fault(method, event_id)
         if fault == "drop":
@@ -88,9 +92,13 @@ class Handler(BaseHTTPRequestHandler):
                 return 409, {"error": "offset mismatch", "offset": len(held)}
             server.partial[event_id] = held + body
             return 200, {"offset": len(held) + len(body)}
-        server.metadata_bytes[event_id] = len(body)
+        sent = len(body)
         if self.headers.get("Content-Encoding") == "gzip":
             body = gzip.decompress(body)
+        if event_id == "heartbeats":
+            server.heartbeats.append(json.loads(body))
+            return 201, {"received": True}
+        server.metadata_bytes[event_id] = sent
         request = json.loads(body)
         if event_id in server.stored:
             return 200, {"received": True}
@@ -153,7 +161,7 @@ def add_event(pending_dir, event_id, size):
     video = os.urandom(size)
     with open(os.path.join(pending_dir, f"{event_id}.mp4"), "wb") as f:
         f.write(video)
-    metadata = {"eventId": event_id, "deviceId": "test-device", "timestamp_start_utc": "2026-11-08T22:00:00+00:00"}
+    metadata = {"format_version": 2, "event_id": event_id, "device_id": "test-device"}
     with open(os.path.join(pending_dir, f"{event_id}.json"), "w") as f:
         json.dump(metadata, f)
     return video, metadata
@@ -371,8 +379,9 @@ def test_failed_markers_and_the_state_file_are_not_uploaded(make_uploader, serve
 def test_the_metadata_is_sent_gzipped(make_uploader, server):
     up = make_uploader()
     _, metadata = add_event(up.pending_dir, EVENT, 10 * KB)
-    metadata["detections"] = [{"frame_index": i, "track_id": i % 7, "label": "animal", "confidence": 0.9,
-                               "detected": i % 5 == 0, "box_xywh": [320, 240, 80, 60]} for i in range(20000)]
+    metadata["tracks"] = [{"track_id": t, "class": "animal", "boxes": {
+        "frame": list(range(3000)), "xyxy": [[280, 210, 360, 270]] * 3000,
+        "detected": [i % 5 == 0 for i in range(3000)], "confidence": [0.91 if i % 5 == 0 else None for i in range(3000)]}} for t in range(7)]
     with open(os.path.join(up.pending_dir, EVENT + ".json"), "w") as f:
         json.dump(metadata, f)
 
@@ -392,3 +401,58 @@ def test_requests_are_paced_to_the_servers_rate_limit(make_uploader, server, mon
 
     # GET, four chunks, and POST: five intervals between six requests.
     assert len(server.log) == 6 and time.monotonic() - started >= 0.5
+
+
+def add_heartbeat(pending_dir, name="heartbeat_20261108-170000.json"):
+    heartbeat = {"format_version": 1, "device_id": "test-device", "events": {"motion": 3}}
+    with open(os.path.join(pending_dir, name), "w") as f:
+        json.dump(heartbeat, f)
+    return heartbeat
+
+
+def test_heartbeats_are_sent_before_events_and_deleted_once_confirmed(make_uploader, server):
+    up = make_uploader()
+    add_event(up.pending_dir, EVENT, KB)
+    first = add_heartbeat(up.pending_dir, "heartbeat_20261108-160000.json")
+    second = add_heartbeat(up.pending_dir, "heartbeat_20261108-170000.json")
+
+    up._upload_pending()
+
+    assert server.heartbeats == [first, second]
+    assert [event_id for method, event_id, _, _ in server.log if method == "POST"] == ["heartbeats", "heartbeats", EVENT]
+    assert not any(f.startswith("heartbeat_") for f in os.listdir(up.pending_dir))
+
+
+def test_a_link_failure_on_a_heartbeat_stops_the_pass(make_uploader, server):
+    up = make_uploader()
+    add_event(up.pending_dir, EVENT, KB)
+    add_heartbeat(up.pending_dir)
+    server.faults = [("POST", "drop", "heartbeats")]
+
+    up._upload_pending()
+
+    assert EVENT not in server.stored and up.resume_at > time.time()
+    assert "heartbeat_20261108-170000.json" in os.listdir(up.pending_dir)
+
+
+def test_a_refused_heartbeat_is_set_aside(make_uploader, server):
+    up = make_uploader()
+    add_event(up.pending_dir, EVENT, KB)
+    add_heartbeat(up.pending_dir)
+    server.faults = [("POST", 422, "heartbeats")]
+
+    up._upload_pending()
+
+    assert EVENT in server.stored
+    assert "heartbeat_20261108-170000.json.failed" in os.listdir(up.pending_dir)
+    up._upload_pending()
+    assert [method for method, event_id, _, _ in server.log if event_id == "heartbeats"] == ["POST"]
+
+
+def test_the_bytes_sent_are_counted_for_the_heartbeat(make_uploader, server):
+    up = make_uploader()
+    add_event(up.pending_dir, EVENT, 200 * KB)
+
+    up._upload_pending()
+
+    assert up.status.take()["uploaded_bytes"] > 200 * KB

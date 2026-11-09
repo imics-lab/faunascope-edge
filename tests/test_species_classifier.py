@@ -63,16 +63,17 @@ def crops(n):
 
 def test_a_confident_species_is_named(make_classifier):
     result = make_classifier([logits(WTD=0.95)]).classify(crops(1), "animal", 0.9)
-    assert (result["prediction"], result["blank"]) == ("white-tailed deer", False)
+    assert (result["name"], result["blank"]) == ("white-tailed deer", False)
     assert result["score"] == pytest.approx(0.95, abs=1e-3)
-    assert result["top_classes"][0] == {"label": "white-tailed deer", "score": pytest.approx(0.95, abs=1e-3)}
+    assert result["taxon"] == LABELS[WTD]
+    assert result["top"][0] == {"taxon": LABELS[WTD], "score": pytest.approx(0.95, abs=1e-3)}
 
 
 def test_probabilities_are_averaged_over_the_crops(make_classifier):
     # Each crop alone would name its deer; averaged, the two split the vote and roll up to the family (this taxonomy has no genus entry).
     classifier = make_classifier([logits(WTD=0.9), logits(MULE=0.9)])
     result = classifier.classify(crops(2), "animal", 0.9)
-    assert (result["prediction"], result["source"]) == ("cervidae family", "classifier+rollup_to_family")
+    assert (result["name"], result["source"]) == ("cervidae family", "classifier+rollup_to_family")
 
 
 def test_crops_are_sent_in_batches_of_at_most_eight(make_classifier):
@@ -83,7 +84,7 @@ def test_crops_are_sent_in_batches_of_at_most_eight(make_classifier):
 
 def test_a_species_outside_its_geofence_is_rolled_up(make_classifier):
     result = make_classifier([logits(TOAD=0.95)]).classify(crops(1), "animal", 0.9)
-    assert result["prediction"] == "bufonidae family"
+    assert result["name"] == "bufonidae family"
 
 
 def test_only_a_very_confident_blank_is_blank(make_classifier):
@@ -93,4 +94,4 @@ def test_only_a_very_confident_blank_is_blank(make_classifier):
 
 def test_a_confident_person_detection_is_human(make_classifier):
     result = make_classifier([logits(WTD=0.9)]).classify(crops(1), "person", 0.8)
-    assert (result["prediction"], result["source"]) == ("human", "detector")
+    assert (result["name"], result["source"]) == ("human", "detector")

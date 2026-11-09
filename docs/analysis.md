@@ -4,7 +4,7 @@ The animal analyzer (`src/animal_analyzer/analyzer.py`, class `AnimalAnalyzer`) 
 
 ## Input
 
-The analyzer reads the queue filled by the motion detector. An event arrives as a sequence of BGR frames followed by `None`. Frame `i` of the queue is frame `i` of the event's video, which is how the boxes in the metadata are tied to the video.
+The analyzer reads the queue filled by the motion detector. An event arrives as a sequence of BGR frames, each with the time it was read from the camera and whether it showed motion, followed by `None` (see [Motion detection](motion-detection.md#events)). Frame `i` of the queue is frame `i` of the event's video, which is how the boxes in the metadata are tied to the video.
 
 ## Detection: MegaDetector
 
@@ -46,7 +46,7 @@ When a significant event ends, `species_classifier.py` classifies every confirme
 4. **People.** A person track with a detector confidence above 0.7 is "human" without consulting the classifier, which is SpeciesNet's own rule.
 5. **Blanks.** Because every confirmed track has a detector confidence of at least 0.2, the rules call a track blank only when its averaged probability of blank exceeds 0.99.
 
-The result for each track (label, score, the rule that produced it, the top five labels) is written to the metadata.
+The result for each track (label, score, the rule that produced it, the top five labels, and the frames of the crops) is written to the metadata, together with a summary per species: its tracks and the most of them visible in one frame.
 
 ## Held events
 
@@ -54,7 +54,7 @@ If SpeciesNet calls every confirmed track of the `trigger_classes` blank, the ev
 
 ## Memory and video encoding
 
-Frames are held in RAM until `ram_frame_limit` (700, about 650 MB at 640 x 480) is reached; the buffer is then encoded to a temporary video part in `output_temp_dir`, a RAM disk in the container. When a significant event ends, the remaining frames are written as a last part, and FFmpeg joins the parts and re-encodes them as H.264 (`-preset slow -crf 24`, `+faststart` so browsers can start playing before the download ends) into the final MP4. The metadata is written to a temporary name and renamed, so the uploader never reads a half-written file.
+Frames are held in RAM until `ram_frame_limit` (700, about 650 MB at 640 x 480) is reached; the buffer is then encoded to a temporary video part in `output_temp_dir`, a RAM disk in the container. When a significant event ends, the remaining frames are written as a last part, and FFmpeg joins the parts and re-encodes them as H.264 (`-preset slow -crf 24`, `+faststart` so browsers can start playing before the download ends) into the final MP4. The parts are written at a nominal `output_fps`; FFmpeg retimes the frames to the average rate at which the camera delivered them, so the video plays at real speed whatever the camera's rate (which falls in low light). The metadata is written to a temporary name and renamed, so the uploader never reads a half-written file.
 
 For an event that is not significant, the parts already written to disk are deleted, or moved to `data/temp_debug/` when `debug_mode` is on; frames still in RAM are dropped either way.
 

@@ -78,6 +78,10 @@ RUN python -m pip install --index-url https://pypi.org/simple piexif
 # -----------------------------------------------------------------------------
 # Copy Application Code
 # -----------------------------------------------------------------------------
+# The commit the image is built from, reported in event metadata and heartbeats (see docs/deployment.md).
+ARG FAUNASCOPE_COMMIT=""
+ENV FAUNASCOPE_COMMIT=${FAUNASCOPE_COMMIT}
+
 COPY main.py .
 COPY src/ ./src/
 COPY scripts/ ./scripts/

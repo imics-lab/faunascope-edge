@@ -6,6 +6,7 @@ from typing import Dict, List
 
 CLASS_NAMES = ('animal', 'person', 'vehicle')
 INPUT_SIZE = 640
+IOU_THRESHOLD = 0.5
 
 
 class MegaDetector:
@@ -14,7 +15,7 @@ class MegaDetector:
 
     Preprocessing and suppression of overlapping boxes follow Pytorch-Wildlife: the frame is scaled to fit 640x640 and padded with gray, and boxes of the same class that overlap by more than iou_threshold are suppressed.
     """
-    def __init__(self, model_path: str, confidence_threshold: float, engine_cache_dir: str, iou_threshold: float = 0.5):
+    def __init__(self, model_path: str, confidence_threshold: float, engine_cache_dir: str, iou_threshold: float = IOU_THRESHOLD):
         import onnxruntime
         available = onnxruntime.get_available_providers()
         providers = []

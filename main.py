@@ -12,6 +12,8 @@ import argparse
 from src.motion_detector.detector import MotionDetector
 from src.animal_analyzer.analyzer import AnimalAnalyzer
 from src.data_uploader.uploader import DataUploader
+from src.device_info import StatusCounters
+from src.heartbeat import Heartbeat
 
 def load_config(config_path="config/config.yaml"):
     """
@@ -77,25 +79,29 @@ def main():
     # 3. Create the shared queue for communication between the
     #    MotionDetector and the AnimalAnalyzer.
     frame_queue = multiprocessing.Queue()
+    # Counters the modules share with the heartbeat, which this process writes once an hour.
+    status = StatusCounters()
 
     # 4. Instantiate the main module classes
     try:
-        motion_detector = MotionDetector(config, video_source=video_source)
-        animal_analyzer = AnimalAnalyzer(frame_queue, config)
+        motion_detector = MotionDetector(config, video_source=video_source, status=status)
+        animal_analyzer = AnimalAnalyzer(frame_queue, config, status)
+        heartbeat = Heartbeat(config, status)
     except KeyError as e:
         print(f"Error: A required key is missing from the configuration file: {e}")
         sys.exit(1)
 
     # 5. Create a process for each module.
     #    The 'target' is the 'start' method of each class instance.
+    analyzer_process = Process(target=animal_analyzer.start)
     processes = [
         Process(target=motion_detector.start, args=(frame_queue,)),
-        Process(target=animal_analyzer.start),
+        analyzer_process,
     ]
 
     uploader_enabled = config.get('uploader', {}).get('enabled', True)
     if uploader_enabled:
-        data_uploader = DataUploader(config)
+        data_uploader = DataUploader(config, status)
         processes.append(Process(target=data_uploader.start))
     else:
         print("Data uploader is disabled. Skipping uploader process.")
@@ -110,6 +116,7 @@ def main():
         # terminate unexpectedly. This prevents zombie processes.
         while True:
             time.sleep(5)
+            heartbeat.tick(analyzer_process.is_alive())
             alive_processes = [p for p in processes if p.is_alive()]
             if len(alive_processes) < len(processes):
                 print("\n--- A subprocess has terminated unexpectedly ---")
@@ -135,6 +142,8 @@ def main():
                 p.join(timeout=5)  # Wait for the process to exit
         
         print("All processes have been terminated.")
+        # The heartbeat of the period so far, so its operating time is not lost.
+        print(f"Wrote {heartbeat.write()}")
         print("--- FaunaScope-Edge Application Shut Down ---")
 
 if __name__ == "__main__":

@@ -48,8 +48,8 @@ def simulate_motion_detector(video_path: str, frame_queue: Queue):
             # End of video
             break
         
-        # Put the frame onto the queue for the analyzer to process
-        frame_queue.put(frame)
+        # Put the frame onto the queue for the analyzer to process, as the motion detector does
+        frame_queue.put((frame, time.time(), time.clock_gettime(time.CLOCK_BOOTTIME), True))
         frame_count += 1
         print(f"[Simulator] Fed frame #{frame_count}", end='\r')
         

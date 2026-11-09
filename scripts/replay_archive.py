@@ -1,7 +1,7 @@
 """
 Runs the animal analyzer (MegaDetector and SpeciesNet, with the settings in config/config.yaml) over recorded event videos and writes one JSON result per video, for comparing the edge models with the archive's labels and tuning their settings.
 
-Each video is treated as one motion event. Videos are not re-encoded. Besides the metadata the analyzer would write, each result records every MegaDetector detection down to --raw-threshold on the detection frames, so other confidence thresholds and tracking settings can be evaluated later without running the detector again. A result that already exists is skipped, so an interrupted run can be restarted.
+Each video is treated as one motion event, with motion in every frame and frame times taken from the video's frame rate. Videos are not re-encoded. Besides the metadata the analyzer would write, each result records every MegaDetector detection down to --raw-threshold on the detection frames, so other confidence thresholds and tracking settings can be evaluated later without running the detector again. A result that already exists is skipped, so an interrupted run can be restarted.
 
     python scripts/replay_archive.py --videos <folder of .mp4> --output <results folder> [--workers 4]
 """
@@ -41,11 +41,12 @@ class RecordingDetector:
 
 
 class VideoQueue:
-    """Delivers a video's frames as one event, then stops the analyzer; tells the recorder the frame index."""
+    """Delivers a video's frames as one event, as the motion detector would, then stops the analyzer; tells the recorder the frame index."""
 
-    def __init__(self, analyzer, path, recorder):
+    def __init__(self, analyzer, path, fps, recorder):
         self.analyzer = analyzer
         self.capture = cv2.VideoCapture(path)
+        self.fps = fps
         self.recorder = recorder
         self.index = -1
         self.done = False
@@ -61,7 +62,7 @@ class VideoQueue:
             return None
         self.index += 1
         self.recorder.frame_index = self.index
-        return frame
+        return frame, self.index / self.fps, self.index / self.fps, True
 
 
 def worker(args):
@@ -84,21 +85,16 @@ def worker(args):
     detector = MegaDetector(settings['detector_model_path'], raw_threshold, engine_cache_dir)
     analyzer.classifier = SpeciesClassifier(settings['classifier_model_dir'], engine_cache_dir,
                                             settings['geofence_country'], settings['geofence_admin1_region'])
-    analyzer.detector_info = {"model": os.path.basename(settings['detector_model_path']), "confidence_threshold": settings['confidence_threshold'],
-                              "detection_interval_frames": settings['detection_interval_frames'], "confirmation_detections": settings['confirmation_detections']}
-    analyzer.classifier_info = {"model": f"SpeciesNet {analyzer.classifier.version}", "crops_per_track": settings['classification_crops']}
+    analyzer.models = {"detector": {"name": os.path.splitext(os.path.basename(settings['detector_model_path']))[0]},
+                       "classifier": {"name": "SpeciesNet", "version": analyzer.classifier.version}}
 
-    # The analyzer's video writing is replaced: the result only needs the metadata.
+    # The analyzer's video and metadata writing is replaced: the result only needs the metadata.
     written = {}
     analyzer._write_video_part = lambda event_id, frames, part_num: 'part' if frames else ''
-    analyzer._concatenate_parts = lambda event_id, parts, output_dir: os.path.join(output_dir, event_id + '.mp4')
+    analyzer._concatenate_parts = lambda event_id, parts, frame_rate, output_dir: os.path.join(output_dir, event_id + '.mp4')
     analyzer._cleanup_temp_files = lambda paths: None
     analyzer._save_for_debug = lambda paths: None
-    analyzer._get_video_duration = lambda path: written['duration']
-
-    def capture_metadata(event_id, video_path, detections, classifications, start, end, duration, output_dir):
-        written['metadata'] = {'held': output_dir == settings['output_held_dir'], 'detections': detections, 'classifications': classifications}
-    analyzer._create_json_metadata = capture_metadata
+    analyzer._write_metadata = lambda metadata, output_dir: written.update(metadata=metadata)
 
     for path in videos:
         name = os.path.basename(path)[:-len('.mp4')]
@@ -107,14 +103,12 @@ def worker(args):
             continue
         capture = cv2.VideoCapture(path)
         fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
-        frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         size = [int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))]
         capture.release()
         written.clear()
-        written['duration'] = frames / fps
         recorder = RecordingDetector(detector, settings['confidence_threshold'])
         analyzer.detector = recorder
-        analyzer.queue = VideoQueue(analyzer, path, recorder)
+        analyzer.queue = VideoQueue(analyzer, path, fps, recorder)
         analyzer.is_running = True
         started = time.time()
         analyzer._event_loop()
@@ -122,15 +116,15 @@ def worker(args):
         result = {
             'video': name, 'frames': recorder.frame_index + 1, 'fps': fps, 'size': size,
             'seconds': round(time.time() - started, 1),
-            'outcome': 'discarded' if metadata is None else ('held' if metadata['held'] else 'uploaded'),
-            'classifications': metadata['classifications'] if metadata else [],
-            'detections': metadata['detections'] if metadata else [],
+            'outcome': 'discarded' if metadata is None else ('held' if metadata['edge_decision'] == 'held_blank' else 'uploaded'),
+            'metadata': metadata,
             'raw_detections': recorder.raw,
         }
         with open(result_path + '.tmp', 'w') as f:
             json.dump(result, f)
         os.replace(result_path + '.tmp', result_path)
-        print(f"{name}: {result['outcome']} {[c['prediction'] for c in result['classifications']]} ({result['frames']} frames, {result['seconds']} s)", flush=True)
+        species = [t['species']['name'] for t in metadata['tracks'] if t['species']] if metadata else []
+        print(f"{name}: {result['outcome']} {species} ({result['frames']} frames, {result['seconds']} s)", flush=True)
 
 
 def main():

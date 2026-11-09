@@ -60,9 +60,9 @@ Both build the image `faunascope-edge-gpu:latest` and name the container `FaunaS
 
 5. **Build and start.**
    ```sh
-   docker compose -f docker-compose-jetson.yml up --build -d
+   FAUNASCOPE_COMMIT=$(git rev-parse --short HEAD) docker compose -f docker-compose-jetson.yml up --build -d
    ```
-   The first start converts both models into TensorRT engines, which takes about 20 minutes on an Orin Nano; nothing is recorded until it finishes. The engines are kept in `data/engine_cache/`, and later starts take seconds. The container restarts automatically after a crash or a reboot (`restart: unless-stopped`).
+   `FAUNASCOPE_COMMIT` puts the commit into the image, and from there into every event's metadata and heartbeat (without it, they identify the code by its hash alone). The first start converts both models into TensorRT engines, which takes about 20 minutes on an Orin Nano; nothing is recorded until it finishes. The engines are kept in `data/engine_cache/`, and later starts take seconds. The container restarts automatically after a crash or a reboot (`restart: unless-stopped`).
 
 ## What runs in the container
 
@@ -80,7 +80,7 @@ The host folders mounted into the container are `config/config.yaml` and `.env` 
 ```sh
 docker compose -f docker-compose-jetson.yml logs -f        # follow the logs
 docker compose -f docker-compose-jetson.yml down           # stop
-docker compose -f docker-compose-jetson.yml up --build -d  # rebuild after a code change
+FAUNASCOPE_COMMIT=$(git rev-parse --short HEAD) docker compose -f docker-compose-jetson.yml up --build -d  # rebuild after a code change
 ls data/pending_upload/ data/held_blank/                   # what is waiting, and what was held
 cat data/pending_upload/.upload_state.json                 # the uploader's counters
 ```

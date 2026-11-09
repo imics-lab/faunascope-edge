@@ -47,7 +47,7 @@ The uploader distinguishes failures of the link from failures of a particular ev
 
 ## Order and state
 
-Each pass, every `scan_interval_seconds` (60), handles the pending events oldest first (event names begin with the time), skipping events with a `.failed` marker or an unexpired deferral, and stops at the first link failure or when the budget is spent. Attempt counts, deferrals, and the bytes sent today are kept in `data/pending_upload/.upload_state.json`, written atomically, so a restart neither resets the limits nor forgets them.
+Each pass, every `scan_interval_seconds` (60), first sends the queued heartbeats (`heartbeat_*.json`, see [Event metadata](metadata.md#heartbeat-format-version-1)) to `POST /api/v1/heartbeats`, gzipped, oldest first. A heartbeat is deleted once the server answers `201` or `200`, renamed `.failed` if the server refuses it, and left in place after a link failure, which ends the pass. The heartbeats do not count against the daily budget, and the bytes sent are reported in the next heartbeat. The pass then handles the pending events oldest first (event names begin with the time), skipping events with a `.failed` marker or an unexpired deferral, and stops at the first link failure or when the budget is spent. Attempt counts, deferrals, and the bytes sent today are kept in `data/pending_upload/.upload_state.json`, written atomically, so a restart neither resets the limits nor forgets them.
 
 Events in `data/held_blank/` are never uploaded; moving a held event's files into `data/pending_upload/` queues it.
 

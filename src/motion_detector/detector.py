@@ -10,6 +10,8 @@ import queue
 from datetime import datetime
 import piexif
 
+from src import device_info
+
 
 class MotionDetector:
     """
@@ -17,12 +19,13 @@ class MotionDetector:
     This module acts as a computationally cheap "gatekeeper" to trigger
     more intensive analysis.
     """
-    def __init__(self, config: Dict, debug_mode: bool = False, video_source=0):
+    def __init__(self, config: Dict, debug_mode: bool = False, video_source=0, status: Optional[device_info.StatusCounters] = None):
         """
         Initializes the Motion Detector.
         :param config: A dictionary with operational parameters.
         :param debug_mode: If True, displays visual feedback windows.
         :param video_source: The camera index (e.g., 0) or a path to a video file.
+        :param status: Counters shared with the heartbeat, which learns from them when the camera last delivered a frame.
         """
         # Isolate the relevant configuration section
         self.config = config['motion_detector']
@@ -56,6 +59,7 @@ class MotionDetector:
         self.is_running = False
         self.queue = None
         self.debug_mode = debug_mode
+        self.status = status
         self.frame_delay = 0
         
     def _read_frame_with_timeout(self, timeout=10.0):
@@ -220,6 +224,8 @@ class MotionDetector:
     def _processing_loop(self) -> None:
         """
         The private method containing the main while loop for frame processing.
+
+        Each frame of an event goes to the queue as (frame, read_at, boot_seconds, motion): the time the frame was read from the camera, as UTC seconds and as seconds since boot (which a change to the system clock does not affect), and whether this frame showed motion. None ends the event.
         """
         logger = logging.getLogger('MotionDetector')
         state = "IDLE"
@@ -237,7 +243,10 @@ class MotionDetector:
             except Exception as e:
                 logger.error("An unexpected exception occurred during camera.read(): %s", e)
                 ret, original_frame = False, None
-            
+            read_at, read_boot_seconds = time.time(), device_info.boot_seconds()
+            if ret and self.status:
+                self.status.camera_frame_at.value = read_boot_seconds
+
             # --- Live View Frame Writing (On-Demand) ---
             should_write_live = False
             if self.live_view_enabled and os.path.exists(self.lock_file_path):
@@ -361,10 +370,10 @@ class MotionDetector:
                     logger.info("Motion detected! Changing to DETECTING state.")
                     state = "DETECTING"
                     last_motion_time = time.time()
-                    if self.queue: self.queue.put(original_frame)
+                    if self.queue: self.queue.put((original_frame, read_at, read_boot_seconds, True))
             
             elif state == "DETECTING":
-                if self.queue: self.queue.put(original_frame)
+                if self.queue: self.queue.put((original_frame, read_at, read_boot_seconds, motion_found_this_frame))
 
                 if motion_found_this_frame:
                     last_motion_time = time.time()

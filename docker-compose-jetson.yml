@@ -27,6 +27,8 @@ services:
         # Use the dustynv/l4t-ml container, which is a comprehensive ML image
         # that directly matches the host's R36 JetPack version.
         BASE_IMAGE: dustynv/l4t-ml:r36.4.0
+        # Set by FAUNASCOPE_COMMIT=$(git rev-parse --short HEAD) docker compose ... up --build
+        FAUNASCOPE_COMMIT: ${FAUNASCOPE_COMMIT:-}
 
     # Image name after building
     image: faunascope-edge-gpu:latest

@@ -6,9 +6,11 @@ import shutil
 import hashlib
 import logging
 from datetime import date
-from typing import Dict
+from typing import Dict, Optional
 
 import requests
+
+from src import device_info
 
 # Link failures pause all uploads for 1, 2, 4, ... minutes, up to this many.
 MAX_BACKOFF_MINUTES = 60
@@ -55,14 +57,18 @@ class DataUploader:
 
     Each event goes through the server's upload API: ask how many bytes of the video the server holds, send the rest in chunks, then send the metadata with the video's size and SHA-256. The server's acceptance of the metadata confirms that the whole event arrived, and only then are the local files moved to uploaded/.
 
+    Each pass first sends the queued heartbeats, which are deleted once the server confirms them.
+
     Link failures pause all uploads with a growing delay and do not count against any event. Event failures count against that event: after event_attempts failures it is deferred for deferral_hours, and after max_deferrals deferrals it gets a .failed marker. Attempt counts, deferrals, and the bytes sent today are kept in a state file in the pending directory, so a restart neither resets the limits nor forgets them.
     """
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, status: Optional[device_info.StatusCounters] = None):
         """
         Initializes the Data Uploader.
         :param config: The full application configuration dictionary.
+        :param status: Counters shared with the heartbeat, which counts the bytes sent.
         """
         self.config = config['uploader']
+        self.status = status or device_info.StatusCounters()
         self.pending_dir = config['animal_analyzer']['output_pending_dir']
         # Construct the 'uploaded' path relative to the 'pending' path
         self.uploaded_dir = os.path.join(os.path.dirname(self.pending_dir.rstrip('/')), 'uploaded')
@@ -138,9 +144,35 @@ class DataUploader:
         return sorted(f for f in names
                       if f.startswith('event_') and f.endswith('.json') and (f + '.failed') not in names)
 
-    def _upload_pending(self) -> None:
-        """One pass over the pending events. Stops at a link failure or when the budget is spent."""
+    def _upload_heartbeats(self) -> bool:
+        """Send the queued heartbeats, oldest first, and delete each once the server confirms it; False after a link failure."""
         logger = logging.getLogger('DataUploader')
+        for name in sorted(f for f in os.listdir(self.pending_dir) if f.startswith('heartbeat_') and f.endswith('.json')):
+            path = os.path.join(self.pending_dir, name)
+            try:
+                with open(path, 'rb') as f:
+                    body = f.read()
+                response = self._request('POST', f"{self.server_url}/api/v1/heartbeats", data=gzip.compress(body), headers={
+                    'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
+            except LinkError as e:
+                self._link_failed(e)
+                return False
+            except OSError as e:
+                logger.error("Cannot read %s: %s", name, e)
+                continue
+            if response.status_code in (200, 201):
+                os.remove(path)
+            else:
+                logger.error("The server refused %s: HTTP %d %s. Renamed to %s.failed.", name, response.status_code,
+                             response_json(response).get('error', ''), name)
+                os.replace(path, path + '.failed')
+        return True
+
+    def _upload_pending(self) -> None:
+        """One pass over the pending heartbeats and events. Stops at a link failure or when the budget is spent."""
+        logger = logging.getLogger('DataUploader')
+        if not self._upload_heartbeats():
+            return
         for job_file in self._pending_events():
             if not self.is_running:
                 return
@@ -227,6 +259,7 @@ class DataUploader:
             response = self.session.request(method, url, timeout=self.timeout, **kwargs)
         except requests.RequestException as e:
             raise LinkError(f"{method} failed: {e}")
+        self.status.add('uploaded_bytes', len(kwargs.get('data') or b''))
         if response.status_code in (401, 429) or response.status_code >= 500:
             raise LinkError(f"{method} answered HTTP {response.status_code} {response_json(response).get('error', '')}")
         self.link_failures = 0

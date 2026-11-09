@@ -49,7 +49,8 @@ animal_analyzer:
     longitude: ${DEVICE_LONGITUDE}  # Loaded from .env file
     timezone: "${DEVICE_TIMEZONE}"  # e.g., "America/Chicago", "America/New_York"
 
-  output_fps: 30.0  # The FPS for output video files. Adjust based on your needs.
+  # The frame rate of the temporary video parts. The final video is encoded at the rate the camera actually delivered the event's frames; this rate is used only if that cannot be measured.
+  output_fps: 30.0
 
   # MegaDetector V6 (MDV6-mit-yolov9-c) in ONNX form; scripts/export_megadetector.py makes it from the published checkpoint.
   detector_model_path: "model_weight/MDV6-mit-yolov9-c.onnx"
