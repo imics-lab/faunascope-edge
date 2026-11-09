@@ -71,7 +71,7 @@ animal_analyzer:
   track_match_iou: 0.3
   track_max_missed_detections: 2
 
-  # SpeciesNet, the species classifier: the files scripts/export_speciesnet.py writes, published as a release of this repository (see README).
+  # SpeciesNet, the species classifier: the files scripts/export_speciesnet.py writes, published as a release of this repository (see docs/models.md).
   classifier_model_dir: "model_weight/speciesnet/"
 
   # Each confirmed track is classified from this many of its most confident detections.

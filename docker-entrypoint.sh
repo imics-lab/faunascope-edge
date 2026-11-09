@@ -72,7 +72,7 @@ if [ ! -f "/app/model_weight/MDV6-mit-yolov9-c.onnx" ]; then
     echo "The application may fail if the MegaDetector model is not available."
 fi
 if [ ! -f "/app/model_weight/speciesnet/speciesnet.onnx" ]; then
-    echo "WARNING: SpeciesNet not found in /app/model_weight/speciesnet/ (see README: Model weights)"
+    echo "WARNING: SpeciesNet not found in /app/model_weight/speciesnet/ (see docs/deployment.md, Model weights)"
 fi
 
 # Fix permissions on mounted volumes (must run as root)
