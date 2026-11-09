@@ -3,22 +3,24 @@ import time
 import json
 import os
 import shutil
+import hashlib
 import subprocess
 import uuid
 import logging
-import numpy as np
 from multiprocessing import Queue
-from typing import Dict, List, Tuple
-from scipy.spatial import distance as dist
-from ultralytics import YOLO
+from typing import Dict, List
 from collections import Counter
-import torch
 from datetime import datetime, timezone
+
+from .megadetector import MegaDetector
+from .tracker import BoxTracker
 
 class AnimalAnalyzer:
     """
-    Analyzes video frame events from a queue, detects animals using YOLO,
+    Analyzes video frame events from a queue, detects animals, people, and vehicles with MegaDetector,
     and packages significant events as video and JSON metadata files.
+
+    MegaDetector runs on every detection_interval_frames-th frame of an event, starting with the first, and a tracker follows its boxes through the frames in between. An event is significant once a track of one of the trigger_classes has been detected in confirmation_detections detection frames; only confirmed tracks are written to the metadata.
     """
 
     def __init__(self, shared_queue: Queue, config: Dict):
@@ -35,8 +37,9 @@ class AnimalAnalyzer:
         self.output_fps = self.config.get('output_fps', 30.0) 
         self.is_running = False
 
-        # YOLO model will be loaded in start() method (required for 'spawn' multiprocessing)
-        self.model = None
+        # The detector is loaded in start(), in the analyzer's own process (required for 'spawn' multiprocessing)
+        self.detector = None
+        self.detector_info = {}
 
         # Track which video codec works on this system (will be detected on first write)
         self.working_codec = None
@@ -68,16 +71,19 @@ class AnimalAnalyzer:
         )
         self.logger = logging.getLogger('AnimalAnalyzer')
         
-        # On Jetson with 'spawn', the cuDNN backend can be problematic.
-        # Disabling it entirely forces PyTorch to use its own, more stable
-        # CUDA implementations for convolutions, which can prevent engine errors.
-        # if torch.cuda.is_available():
-        #     torch.backends.cudnn.enabled = False
-
-        # Load YOLO model in child process (required for 'spawn' start method)
-        self.logger.info("Loading YOLO model in child process...")
-        self.model = YOLO(self.config['yolo_model_path'])
-        self.logger.info("YOLO model loaded successfully.")
+        model_path = self.config['detector_model_path']
+        self.logger.info("Loading MegaDetector from %s...", model_path)
+        self.detector = MegaDetector(model_path, self.config['confidence_threshold'], self.config['detector_engine_cache_dir'])
+        with open(model_path, 'rb') as f:
+            model_sha256 = hashlib.sha256(f.read()).hexdigest()
+        self.detector_info = {
+            "model": os.path.basename(model_path),
+            "model_sha256": model_sha256,
+            "confidence_threshold": self.config['confidence_threshold'],
+            "detection_interval_frames": self.config['detection_interval_frames'],
+            "confirmation_detections": self.config['confirmation_detections'],
+        }
+        self.logger.info("MegaDetector loaded (sha256 %s).", model_sha256[:12])
         
         if self.is_running:
             self.logger.warning("Animal analyzer is already running.")
@@ -107,62 +113,56 @@ class AnimalAnalyzer:
             event_start_time = time.time()
             self.logger.info("New event received: %s", event_id)
 
-            ram_buffer = [first_frame]
+            ram_buffer = []
             temp_file_parts = []
-            tracked_objects = {}
-            next_object_id = 0
-            all_confirmed_detections = []
+            tracker = BoxTracker(self.config['track_match_iou'], self.config['track_max_missed_detections'])
+            confirmed_tracks = set()
+            boxes_by_track = {}
             significant_event_detected = False
             frame_index = 0
-            
+            frame = first_frame
+
             # --- Process all frames for this event ---
-            while True:
-                frame = self.queue.get()
-                if frame is None:
-                    break
-                
+            while frame is not None:
                 ram_buffer.append(frame)
-                frame_index += 1
-                
-                # 1. RUN YOLO INFERENCE AND PARSE RESULTS
-                results = self.model(frame, verbose=False)
-                current_detections = self._parse_yolo_results(results)
 
-                # 2. UPDATE OBJECT TRACKING
-                tracked_objects, next_object_id = self._update_tracker(
-                    tracked_objects, current_detections, next_object_id
-                )
-                
-                # 3. CHECK FOR EVENT SIGNIFICANCE & GATHER DETECTIONS
-                for obj_id, obj_data in tracked_objects.items():
-                    # Check if this object just became significant
-                    if (obj_data['label'] in self.config['species_of_interest'] and
-                        obj_data['frames_seen'] == self.config['event_confirmation_frames'] and
-                        not obj_data.get('confirmed', False)):
-                        
-                        self.logger.info("  > Confirmed significant object: %s (ID: %s)", obj_data['label'], obj_id)
-                        significant_event_detected = True
-                        obj_data['confirmed'] = True
+                # 1. DETECT ON EVERY N-TH FRAME, FOLLOW THE BOXES IN BETWEEN
+                is_detection_frame = frame_index % self.config['detection_interval_frames'] == 0
+                detections = self.detector.detect(frame) if is_detection_frame else None
+                visible = tracker.update(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), detections)
 
-                    # If the event is significant, log all new detections of tracked, interesting species
-                    if significant_event_detected and obj_data['label'] in self.config['species_of_interest'] and obj_data['just_seen']:
-                        cx, cy = obj_data['centroid']
-                        w,  h  = obj_data['last_box_xywh'][2], obj_data['last_box_xywh'][3]
-                        all_confirmed_detections.append({
-                            "frame_index": frame_index,
-                            "label": obj_data['label'],
-                            "confidence": float(obj_data['last_confidence']),
-                            "box_xywh": [cx, cy, int(w), int(h)]
-                        })
+                # 2. CHECK FOR EVENT SIGNIFICANCE & GATHER BOXES
+                for track in visible:
+                    x1, y1, x2, y2 = track.box
+                    boxes_by_track.setdefault(track.track_id, []).append({
+                        "frame_index": frame_index,
+                        "track_id": track.track_id,
+                        "label": track.label,
+                        "confidence": round(track.confidence, 4),
+                        "detected": track.detected,
+                        "box_xywh": [int((x1 + x2) / 2), int((y1 + y2) / 2), int(x2 - x1), int(y2 - y1)]
+                    })
+                    if track.hits >= self.config['confirmation_detections'] and track.track_id not in confirmed_tracks:
+                        confirmed_tracks.add(track.track_id)
+                        self.logger.info("  > Confirmed %s (track %s)", track.label, track.track_id)
+                        if track.label in self.config['trigger_classes']:
+                            significant_event_detected = True
 
-                # 4. HANDLE MEMORY MANAGEMENT (SPILL TO DISK)
+                # 3. HANDLE MEMORY MANAGEMENT (SPILL TO DISK)
                 if len(ram_buffer) >= self.config['ram_frame_limit']:
                     self.logger.info("RAM limit reached. Spilling %d frames to disk...", len(ram_buffer))
                     temp_path = self._write_video_part(event_id, ram_buffer, len(temp_file_parts))
                     if temp_path:
                         temp_file_parts.append(temp_path)
                     ram_buffer.clear()
-            
+
+                frame_index += 1
+                frame = self.queue.get()
+
+            all_confirmed_detections = sorted(
+                (box for track_id in confirmed_tracks for box in boxes_by_track[track_id]),
+                key=lambda box: (box["frame_index"], box["track_id"]))
+
             # --- EVENT FINALIZATION ---
             event_end_time = time.time()
             self.logger.info("Event %s finished. Finalizing...", event_id)
@@ -216,108 +216,6 @@ class AnimalAnalyzer:
         except Exception as e:
             self.logger.error("Could not calculate video duration for %s: %s", video_path, e)
             return 0.0
-
-    def _parse_yolo_results(self, results) -> List[Dict]:
-        """Parses the output from the YOLO model into a standardized list of dicts."""
-        detections = []
-        if results and results[0]:
-            boxes = results[0].boxes
-            for box in boxes:
-                if box.conf[0] >= self.config['confidence_threshold']:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    w, h = x2 - x1, y2 - y1
-                    cx, cy = int(x1 + w/2), int(y1 + h/2)
-                    detections.append({
-                        'label': self.model.names[int(box.cls[0])],
-                        'confidence': box.conf[0].cpu().numpy(),
-                        'box_xywh':  (cx, cy, int(w), int(h)),
-                        'centroid': (cx, cy)
-                    })
-        return detections
-
-    def _update_tracker(self, tracked_objects: Dict, current_detections: List, next_object_id: int) -> Tuple[Dict, int]:
-        """Updates the state of tracked objects using a simple centroid-based algorithm."""
-        
-        # If there are no existing objects, register all new detections
-        if len(tracked_objects) == 0:
-            for det in current_detections:
-                tracked_objects[next_object_id] = {
-                    'id': next_object_id, 'label': det['label'], 'centroid': det['centroid'],
-                    'frames_seen': 1, 'frames_since_seen': 0, 'just_seen': True,
-                    'last_confidence': det['confidence'], 'last_box_xywh':  det['box_xywh'],
-                }
-                next_object_id += 1
-            return tracked_objects, next_object_id
-
-        # Prepare lists of existing and new centroids
-        existing_obj_ids = list(tracked_objects.keys())
-        existing_centroids = [tracked_objects[oid]['centroid'] for oid in existing_obj_ids]
-        new_centroids = [det['centroid'] for det in current_detections]
-
-        # Mark all objects as not seen in this frame initially
-        for oid in tracked_objects:
-            tracked_objects[oid]['just_seen'] = False
-
-        # If no new detections, just increment disappearance counter for all existing objects
-        if len(current_detections) == 0:
-            for oid in tracked_objects:
-                tracked_objects[oid]['frames_since_seen'] += 1
-        # Otherwise, perform matching
-        else:
-            # Calculate the distance between all pairs of existing and new centroids
-            D = dist.cdist(np.array(existing_centroids), np.array(new_centroids))
-
-            # Find the best match for each existing object (smallest distance)
-            rows = D.min(axis=1).argsort()
-            cols = D.argmin(axis=1)[rows]
-
-            used_rows = set()
-            used_cols = set()
-
-            for row, col in zip(rows, cols):
-                if row in used_rows or col in used_cols:
-                    continue
-                
-                # If distance is too large, it's not the same object
-                if D[row, col] > self.config.get('tracking_max_distance', 75): # Use a default if not in config
-                    continue
-
-                # It's a match! Update the tracked object.
-                object_id = existing_obj_ids[row]
-                tracked_objects[object_id]['centroid'] = new_centroids[col]
-                tracked_objects[object_id]['frames_seen'] += 1
-                tracked_objects[object_id]['frames_since_seen'] = 0
-                tracked_objects[object_id]['just_seen'] = True
-                tracked_objects[object_id]['last_confidence'] = current_detections[col]['confidence']
-                tracked_objects[object_id]['last_box_xywh'] = current_detections[col]['box_xywh']
-                
-                used_rows.add(row)
-                used_cols.add(col)
-
-            # Handle objects that were not matched
-            unmatched_rows = set(range(len(existing_obj_ids))) - used_rows
-            unmatched_cols = set(range(len(new_centroids))) - used_cols
-
-            for row in unmatched_rows:
-                object_id = existing_obj_ids[row]
-                tracked_objects[object_id]['frames_since_seen'] += 1
-
-            for col in unmatched_cols:
-                det = current_detections[col]
-                tracked_objects[next_object_id] = {
-                    'id': next_object_id, 'label': det['label'], 'centroid': det['centroid'],
-                    'frames_seen': 1, 'frames_since_seen': 0, 'just_seen': True,
-                    'last_confidence': det['confidence'], 'last_box_xywh': det['box_xywh']
-                }
-                next_object_id += 1
-
-        # Prune stale tracks that have been gone for too long
-        final_tracked_objects = {}
-        for obj_id, obj_data in tracked_objects.items():
-            if obj_data['frames_since_seen'] <= self.config['tracking_inactivity_frames']:
-                final_tracked_objects[obj_id] = obj_data
-
-        return final_tracked_objects, next_object_id
 
     def _write_video_part(self, event_id: str, frames: List, part_num: int) -> str:
         """
@@ -454,6 +352,7 @@ class AnimalAnalyzer:
                 "primary_species": primary,
                 "max_confidence": max((d['confidence'] for d in detections), default=0.0)
             },
+            "detector": self.detector_info,
             "detections": detections
         }
         json_path = os.path.join(self.config['output_pending_dir'], f"{event_id}.json")

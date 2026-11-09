@@ -210,3 +210,6 @@ __marimo__/
 logs/*.log
 
 llm_interaction_log.md
+
+# TensorRT engines built on the device
+data/detector_cache/

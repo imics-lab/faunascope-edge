@@ -51,47 +51,27 @@ animal_analyzer:
 
   output_fps: 30.0  # The FPS for output video files. Adjust based on your needs.
 
-  # The file path to the trained YOLO model weights (e.g., .pt file).
-  yolo_model_path: "model_weight/best.pt"
+  # MegaDetector V6 (MDV6-mit-yolov9-c) in ONNX form; scripts/export_megadetector.py makes it from the published checkpoint.
+  detector_model_path: "model_weight/MDV6-mit-yolov9-c.onnx"
 
-  # A list of class names that are considered significant events.
-  # If YOLO detects any of these, the event will be saved and uploaded.
-  # Names must match the class names in your YOLO model.
-  species_of_interest:
-    - 'American_Badger'
-    - 'Bobcat'
-    - 'Common_Raccoon'
-    - 'Coyote'
-    - 'Domestic_Cat'
-    - 'Domestic_Chicken'
-#    - 'Domestic_Cow'
-    - 'Domestic_Dog'
-    - 'Domestic_Goat'
-#    - 'Domestic_Sheep'
-    - 'Dove_Pigeon'
-    - 'Fox'
-    - 'Human'
-    - 'Mountain_Lion'
-    - 'Mouse_Rat'
-    - 'Mule_Deer'
-    - 'Nine-Banded_Armadillo'
-    - 'Rabbit_Hare'
-    - 'Skunk'
-    - 'Squirrel_Chipmunk'
-    - 'Virginia_Opossum'
-    - 'Vulture'
-    - 'White-Tailed_Deer'
-    - 'Wild_Pig'
-    - 'Wild_Turkey'
+  # On a GPU with TensorRT, the first start converts the model into a TensorRT engine (about 8 minutes on a Jetson Orin Nano) and keeps it here; later starts take seconds.
+  detector_engine_cache_dir: "data/detector_cache/"
 
-  tracking_max_distance: 75
+  # MegaDetector's classes are animal, person, and vehicle. An event is kept when a track of one of these classes is confirmed.
+  trigger_classes: ['animal', 'person']
 
-  # The minimum confidence score (0.0 to 1.0) for a YOLO detection to be considered.
-  confidence_threshold: 0.4
+  # The minimum MegaDetector confidence (0.0 to 1.0) for a detection to count.
+  confidence_threshold: 0.2
 
-  event_confirmation_frames: 5         
-  tracking_inactivity_frames: 10 
+  # MegaDetector runs on every N-th frame of an event, starting with the first; optical-flow tracking moves its boxes through the frames in between.
+  detection_interval_frames: 5
 
+  # A track is confirmed once it has been detected in this many detection frames.
+  confirmation_detections: 2
+
+  # A detection continues the track of the same class whose box it overlaps most, if their IoU is at least track_match_iou. A track that no detection continues in more than track_max_missed_detections detection frames in a row ends.
+  track_match_iou: 0.3
+  track_max_missed_detections: 2
 
   # The maximum number of full-resolution frames to hold in RAM at one time.
   # If an event is longer than this, frames will be temporarily written to disk

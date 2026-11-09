@@ -7,15 +7,15 @@ An intelligent, field-deployable animal monitoring system. FaunaScope-Edge uses 
 This repository contains the source code for the edge device component of the FaunaScope project. The system is designed to run on a power-constrained device (like a Jetson Nano Orin) deployed in the wild. It employs a three-module architecture to maximize efficiency and reliability:
 
 1.  **Motion Detection:** A lightweight, low-power process continuously monitors a low-resolution video stream for any motion.
-2.  **Animal Analysis:** When motion is detected, high-resolution frames are passed to a more powerful YOLO-based model to identify specific animal species.
-3.  **Data Upload:** If an animal of interest is confirmed, the event (video and metadata) is packaged and handed to a resilient uploader that sends the data to a cloud server.
+2.  **Animal Analysis:** When motion is detected, MegaDetector checks the event's frames for animals and people, and an optical-flow tracker follows its boxes between the frames it checks.
+3.  **Data Upload:** If an animal or person is confirmed, the event (video and metadata) is packaged and handed to a resilient uploader that sends the data to a cloud server.
 
 This approach ensures that the power-hungry GPU and network components are only activated when there is a high probability of a significant biological event, dramatically extending battery life.
 
 ## Key Features
 
 -   **Efficient Motion Detection:** Uses adaptive background subtraction to filter out environmental noise like wind and changing shadows.
--   **AI-Powered Species Identification:** Employs a YOLO model to analyze motion events and confirm the presence of target animal species.
+-   **Animal Detection:** Runs MegaDetector V6 (`MDV6-mit-yolov9-c`), a camera-trap detector trained on millions of images from many ecosystems, on every fifth frame of a motion event. It finds animals, people, and vehicles but does not name species; the server identifies the species.
 -   **Robust Data Packaging:** Confirmed events are saved as a pair: a high-quality MP4 video and a detailed JSON metadata file.
 -   **Resilient Data Upload:** A background process sends each event to the FaunaScope server over HTTPS, in chunks that resume where an interrupted upload stopped. Files stay on the device until the server confirms the whole event, network failures are retried with a growing delay, and a daily limit keeps a backlog from using up the data plan.
 -   **Modular Architecture:** The system is built with three independent processes that communicate safely, ensuring stability and responsiveness.
@@ -95,10 +95,10 @@ FaunaScope-Edge is primarily intended to run in a Docker container on a CUDA-cap
         The `.env` file is git-ignored and contains deployment-specific settings like camera resolution, the device token, and device location.
     
     -   **Algorithm parameters** (`config/config.yaml`):
-        Edit this file to adjust motion detection thresholds, species of interest, and other algorithm settings. This file is safe to commit to version control.
+        Edit this file to adjust motion detection thresholds, the detector's confidence threshold and trigger classes, and other algorithm settings. This file is safe to commit to version control.
 
-3.  **Place model weights:**
-    Put the trained YOLO model at `model_weight/best.pt`.
+3.  **Model weights:**
+    The detector is `model_weight/MDV6-mit-yolov9-c.onnx`. It was made with `scripts/export_megadetector.py` from Microsoft's `MDV6-mit-yolov9-c.ckpt` (https://zenodo.org/records/15398270, CC BY 4.0; code MIT), the MegaDetector V6 variant trained with MultimediaTechLab's MIT-licensed YOLO code.
 
 4.  **Run with Docker Compose:**
     ```sh
@@ -151,7 +151,7 @@ The uploader sends the oldest events first and moves an event to `data/uploaded/
 -   **`config/`**: Contains the `config.yaml` file for all system settings.
 -   **`src/`**: Contains the core source code for the application.
     -   `motion_detector/`: Module A for detecting motion.
-    -   `animal_analyzer/`: Module B for YOLO analysis and data packaging.
+    -   `animal_analyzer/`: Module B for MegaDetector, tracking, and data packaging.
     -   `data_uploader/`: Module C for handling cloud uploads.
 -   **`data/`**: Default location for generated data.
     -   `pending_upload/`: Staging area for video/JSON pairs waiting to be uploaded.
@@ -163,7 +163,8 @@ The uploader sends the oldest events first and moves an event to `data/uploaded/
 
 The `scripts/` directory contains tools to help test parts of the system in isolation:
 -   `test_camera.py`: Verify that your camera is detected and working correctly.
--   `test_yolo.py`: Run the YOLO model on a test image or video to confirm it's functional.
+-   `test_analyzer.py`: Run the animal analyzer on a video file as one motion event.
+-   `export_megadetector.py`: Convert the MegaDetector checkpoint to the ONNX model the analyzer loads.
 -   `test_detector.py`: Test motion detection module functionality using a video file.
 
 The unit tests in `tests/` run without a camera, a GPU, or a server. They need `ffmpeg` on the PATH and the Python packages in `requirements-dev.txt`:

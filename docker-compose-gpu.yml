@@ -11,7 +11,7 @@
 # Note on Hardware Acceleration:
 #   - Jetson-specific hardware video decode (nvvidconv, nvv4l2decoder) is not available
 #   - Video decoding will use CPU (software fallback), which is acceptable on x86_64
-#   - GPU is still fully utilized for YOLO inference
+#   - GPU is still fully utilized for MegaDetector inference
 #
 # Usage:
 #   Build and start: docker compose -f docker-compose-gpu.yml up --build -d
@@ -58,13 +58,15 @@ services:
       # Environment variables (REQUIRED - contains credentials and hardware settings)
       - ./.env:/app/.env:ro
 
-      # Model weights (REQUIRED - your trained YOLO model)
+      # Model weights (REQUIRED - the MegaDetector ONNX model)
       - ./model_weight:/app/model_weight:ro
 
       # Data directories for output and uploads
       - ./data/pending_upload:/app/data/pending_upload
       - ./data/uploaded:/app/data/uploaded
       - ./data/temp_debug:/app/data/temp_debug
+      # TensorRT engine built from the model on the first start
+      - ./data/detector_cache:/app/data/detector_cache
 
       # Logs directory for persistent logging
       - ./logs:/app/logs

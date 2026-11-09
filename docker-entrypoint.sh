@@ -67,9 +67,9 @@ if [ ! -f "/app/.env" ]; then
 fi
 
 # Check if model weights exist
-if [ ! -f "/app/model_weight/best.pt" ]; then
-    echo "WARNING: Model weights not found at /app/model_weight/best.pt"
-    echo "The application may fail if the YOLO model is not available."
+if [ ! -f "/app/model_weight/MDV6-mit-yolov9-c.onnx" ]; then
+    echo "WARNING: Model weights not found at /app/model_weight/MDV6-mit-yolov9-c.onnx"
+    echo "The application may fail if the MegaDetector model is not available."
 fi
 
 # Fix permissions on mounted volumes (must run as root)

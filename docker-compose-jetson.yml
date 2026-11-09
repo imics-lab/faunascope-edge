@@ -50,13 +50,15 @@ services:
       # Environment variables (REQUIRED - contains credentials and hardware settings)
       - ./.env:/app/.env:ro
 
-      # Model weights (REQUIRED - your trained YOLO model)
+      # Model weights (REQUIRED - the MegaDetector ONNX model)
       - ./model_weight:/app/model_weight:ro
 
       # Data directories for output and uploads
       - ./data/pending_upload:/app/data/pending_upload
       - ./data/uploaded:/app/data/uploaded
       - ./data/temp_debug:/app/data/temp_debug
+      # TensorRT engine built from the model on the first start
+      - ./data/detector_cache:/app/data/detector_cache
 
       # Logs directory for persistent logging
       - ./logs:/app/logs

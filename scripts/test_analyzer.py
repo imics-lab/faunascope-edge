@@ -119,6 +119,6 @@ def main():
             analyzer_process.terminate()
         print("--- Test Harness Finished ---")
 
-# Run as: python scripts/test_yolo.py --video video_file.mp4
+# Run as: python scripts/test_analyzer.py --video video_file.mp4
 if __name__ == "__main__":
     main()

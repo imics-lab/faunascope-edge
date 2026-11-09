@@ -59,12 +59,9 @@ WORKDIR /app
 # -----------------------------------------------------------------------------
 # Install Python Dependencies
 # -----------------------------------------------------------------------------
-# Both base images (dustynv/l4t-ml and nvcr.io/nvidia/pytorch) come with
-# torch and torchvision pre-installed. We install ultralytics separately
-# to ensure it uses the system-provided torch.
-# --no-dependencies prevents pip from replacing the pre-compiled packages
-# in the base image (like numpy, torch, etc.)
-RUN python -m pip install --index-url https://pypi.org/simple --no-dependencies ultralytics
+# MegaDetector runs on ONNX Runtime. The Jetson base image (dustynv/l4t-ml) already has
+# a GPU build with TensorRT; on other images, install the GPU build from PyPI.
+RUN python -c "import onnxruntime" || python -m pip install --index-url https://pypi.org/simple onnxruntime-gpu
 RUN python -m pip install --index-url https://pypi.org/simple matplotlib
 
 # Networking
